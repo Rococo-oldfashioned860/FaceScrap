@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "FaceScrap",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Save the Facebook reels, stories and highlights you can watch, with one click.",
+  "action": {
+    "default_title": "FaceScrap"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": [
+    "webRequest",
+    "storage",
+    "downloads",
+    "declarativeNetRequest",
+    "offscreen",
+    "sidePanel"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; img-src 'self' https://*.fbcdn.net data:"
+  },
+  "host_permissions": [
+    "*://*.facebook.com/*",
+    "*://*.fbcdn.net/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.facebook.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-hook.js"],
+      "matches": ["*://*.facebook.com/*"]
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "fbcdn_referer",
+        "enabled": true,
+        "path": "rules/referer-rules.json"
+      }
+    ]
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

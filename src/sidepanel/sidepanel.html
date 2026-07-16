@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="sidepanel.css" />
+    <title>FaceScrap</title>
+  </head>
+  <body>
+    <header>
+      <h1>
+        <svg class="mark" width="20" height="20" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <!-- "Flow route": the page (origin ring) loops out through the D-bowl
+               and lands as a saved file — green destination node, filed square. -->
+          <path d="M8.5 7C17.5 7 23.5 10.5 23.5 16C23.5 21.5 17.5 25 8.5 25" stroke="#166FE5" stroke-width="2" stroke-linecap="round" />
+          <path d="M8.5 10.5V21.5" stroke="#166FE5" stroke-width="1.5" stroke-linecap="round" />
+          <circle cx="8.5" cy="7" r="3.5" fill="#FFFFFF" stroke="#166FE5" stroke-width="1.5" />
+          <circle cx="23.5" cy="16" r="3.5" fill="#42B72A" />
+          <rect x="5.5" y="22" width="6" height="6" rx="1.5" fill="#FCA7B5" />
+        </svg>
+        FaceScrap
+      </h1>
+      <div class="header-right">
+        <button id="clear" class="btn-ghost" data-i18n="clear" data-i18n-title="titleClear">Clear</button>
+        <button id="settings-open" class="icon-btn" type="button" data-i18n-title="titleSettings" data-i18n-aria="titleSettings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V15z" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="settings" class="settings-sheet" hidden>
+      <div class="settings-head">
+        <h2 data-i18n="settings">Settings</h2>
+        <button id="settings-close" class="icon-btn" type="button" data-i18n-aria="titleCloseSettings" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
+      </div>
+      <div class="settings-body">
+        <h3 class="settings-group" data-i18n="settingsDownloads">Downloads</h3>
+        <div class="settings-row col">
+          <span class="settings-label" data-i18n="settingsTemplate">Filename</span>
+          <input id="set-template" class="settings-input" type="text" spellcheck="false" autocomplete="off" maxlength="200" />
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsSubfolder">Save in "FaceScrap/" subfolder</span>
+          <label class="switch"><input id="set-subfolder" type="checkbox" /><span class="track"></span></label>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsQuality">Default quality</span>
+          <select id="set-quality" class="settings-select">
+            <option value="highest" data-i18n="qualityHighest">Highest</option>
+            <option value="lowest" data-i18n="qualityLowest">Lowest</option>
+            <option value="ask" data-i18n="qualityAsk">Ask</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsDirect">Direct download (no audio merge)</span>
+          <label class="switch"><input id="set-direct" type="checkbox" /><span class="track"></span></label>
+        </div>
+
+        <h3 class="settings-group" data-i18n="settingsPanel">Panel</h3>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsLanguage">Language</span>
+          <div id="lang" class="lang-toggle">
+            <button type="button" data-lang="en" class="is-active">EN</button>
+            <button type="button" data-lang="es">ES</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsFollowLang">Follow browser language</span>
+          <label class="switch"><input id="set-followlang" type="checkbox" /><span class="track"></span></label>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsOrder">List order</span>
+          <select id="set-order" class="settings-select">
+            <option value="newest" data-i18n="orderNewest">Newest first</option>
+            <option value="oldest" data-i18n="orderOldest">Oldest first</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsConfirmClear">Confirm before clearing</span>
+          <label class="switch"><input id="set-confirmclear" type="checkbox" /><span class="track"></span></label>
+        </div>
+
+        <h3 class="settings-group" data-i18n="settingsCapture">Capture</h3>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsVideosOnly">Videos only</span>
+          <label class="switch"><input id="set-videosonly" type="checkbox" /><span class="track"></span></label>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsMinRes">Minimum resolution</span>
+          <select id="set-minres" class="settings-select">
+            <option value="0" data-i18n="resNone">No minimum</option>
+            <option value="360">360p</option>
+            <option value="480">480p</option>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label" data-i18n="settingsMaxItems">Max saved items</span>
+          <select id="set-maxitems" class="settings-select">
+            <option value="500">500</option>
+            <option value="1500">1500</option>
+            <option value="5000">5000</option>
+            <option value="0" data-i18n="maxUnlimited">Unlimited</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <nav id="filters">
+      <button class="chip is-active" data-filter="playing" data-i18n="filterPlaying">▶ Now playing</button>
+      <button class="chip" data-filter="all" data-i18n="filterAll">All</button>
+      <button class="chip" data-filter="video" data-i18n="filterVideos">Videos</button>
+      <button class="chip" data-filter="image" data-i18n="filterImages">Images</button>
+    </nav>
+
+    <p id="degraded" class="banner" hidden data-i18n="bannerDegraded">
+      This browser can't merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.
+    </p>
+
+    <main id="list" aria-live="polite"></main>
+
+    <div id="empty" class="empty">
+      <h2 data-i18n="emptyTitle">No signal</h2>
+      <p data-i18n="emptyState">
+        Play a reel or story. You'll see only what you're watching now — if something is missing, check "All".
+      </p>
+    </div>
+
+    <footer>
+      <p class="note" data-i18n="footerNote">
+        HD videos are merged with audio automatically. Only download content you have the rights to.
+      </p>
+    </footer>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
