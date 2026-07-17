@@ -18,26 +18,27 @@ Chrome extension (Manifest V3, TypeScript) for **personal use** (load unpacked).
    `image.uri`.
 3. An isolated **content script** scans the DOM (`<video>`, `<img>`, poster) as
    a fallback and relays everything to the service worker.
-4. The **side panel** lists the active tab's captures live — filtered by
-   default to what's playing now — and downloads via `chrome.downloads` (HD
-   videos get their audio merged in an offscreen document). Each video row
-   shows its cover thumbnail (when one was captured), its duration when the
-   DASH manifest carries it, and a per-video quality picker when more than
-   one resolution is available; hovering the thumbnail reveals a button that
-   saves just the cover image. EN|ES language toggle, a Clear button that
-   wipes the tab's list, and a settings sheet behind the gear icon. The
-   toolbar icon and panel are enabled only on facebook.com tabs. Being a
-   side panel rather than a popup, it stays open while videos play on the
-   page.
+4. The **side panel** presents the active tab's captures in three views —
+   Now Playing, Library, Saved — and downloads via `chrome.downloads` (HD
+   videos get their audio merged in an offscreen document). **Now Playing**
+   focuses the video you are watching: its cover, format/duration/resolution,
+   a quality picker when more than one resolution exists, and one Download.
+   **Library** is a card grid of everything captured on the tab, with
+   All/Videos/Images sub-filters, a per-card download button, and multi-select
+   with a download tray. **Saved** is the same grid narrowed to what you have
+   already downloaded from the tab. The gear opens Settings, which also holds
+   the Clear button and the EN|ES language toggle. The toolbar icon and panel
+   are enabled only on facebook.com tabs. Being a side panel rather than a
+   popup, it stays open while videos play on the page.
 
 ### Now playing
 
-The default filter tracks the video you are actually watching: on
+The Now Playing view tracks the video you are actually watching: on
 `/reel/<id>` and `/watch` pages by the URL's video id (matched against the
 `efg` asset keys every representation carries), elsewhere by the media
 centered in the viewport plus the tracks fbcdn is streaming right now —
 scored across a window, so a background prefetch of a neighbouring video
-cannot take the slot. The current video stays listed while paused or idle
+cannot take the slot. The current video stays shown while paused or idle
 and survives switching tabs; moving to the next video or photo replaces it.
 
 ### Settings

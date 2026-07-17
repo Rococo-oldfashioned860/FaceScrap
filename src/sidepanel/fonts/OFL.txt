@@ -1,11 +1,15 @@
 The fonts bundled in this folder are licensed under the SIL Open Font
 License, Version 1.1. Their copyright notices and Reserved Font Names:
 
-  Manrope (manrope-var.woff2)
-  Copyright 2018 The Manrope Project Authors
-  (https://github.com/sharanda/manrope)
+  Space Grotesk (space-grotesk-var.woff2)
+  Copyright 2020 The Space Grotesk Project Authors
+  (https://github.com/floriankarsten/space-grotesk)
 
-  IBM Plex Mono (ibm-plex-mono-400.woff2, ibm-plex-mono-500.woff2)
+  Inter (inter-var.woff2)
+  Copyright 2016 The Inter Project Authors
+  (https://github.com/rsms/inter)
+
+  IBM Plex Mono (ibm-plex-mono-400.woff2)
   Copyright 2017 IBM Corp. with Reserved Font Name "Plex"
 
 -----------------------------------------------------------

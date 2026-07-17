@@ -1,313 +1,826 @@
-/* FaceScrap side panel — "FLOW": a guided route from the page to your file.
-   Facebook-light surfaces: grey canvas, white cards, one blue for wayfinding,
-   green for the save action, mono for every machine-read value. Flat ink —
-   no gradients, no glow, no glass. All colors flow from the tokens below. */
+/* FaceScrap side panel. Three top-level views share one document — Now Playing,
+   Library and Saved — switched by the pill nav; Settings is a full overlay.
+   Bright memories mounted on dark stock: a blue-black canvas, lifted cards, one
+   Facebook-family blue for every primary action, gold as the warm second voice. */
 
+/* Both faces are variable and latin-subset (U+0000–00FF), which covers EN and ES
+   in full — ñ, á, ¿, ¡ all live in Latin-1 Supplement. One file per family. */
 @font-face {
-  font-family: "Manrope";
-  src: url("fonts/manrope-var.woff2") format("woff2");
-  font-weight: 200 800;
+  font-family: "Space Grotesk";
+  src: url("fonts/space-grotesk-var.woff2") format("woff2");
+  font-weight: 300 700;
   font-display: swap;
 }
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+/* Mono is used for one field only: the filename template in Settings. */
 @font-face {
   font-family: "IBM Plex Mono";
   src: url("fonts/ibm-plex-mono-400.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
 }
-@font-face {
-  font-family: "IBM Plex Mono";
-  src: url("fonts/ibm-plex-mono-500.woff2") format("woff2");
-  font-weight: 500;
-  font-display: swap;
-}
 
 :root {
-  /* Surfaces */
-  --canvas: #F0F2F5;
-  --card: #FFFFFF;
-  --card-line: #E4E6EB;
-  --line: #CED0D4;
-  --tint: #E7F3FF;
-  --tint-deep: #D4E6FB;
+  /* Surfaces — a blue-black canvas, cards one step up, a subtler tint for inputs
+     and the selection tray. */
+  --canvas: #0E1420;      /* bg-canvas */
+  --card: #18202F;        /* bg-surface */
+  --tint: #26324A;        /* bg-subtle */
+  --card-line: #2C384D;   /* border-default */
 
-  /* Brand — wayfinding blue, save green */
-  --blue: #1877F2;
-  --blue-deep: #166FE5;
-  --green: #42B72A;
-  --green-deep: #36A420;
-  --on-accent: #FFFFFF;
+  /* Brand — Facebook's hue lifted in luminance until it carries on black
+     (~6:1). Gold is the warm second voice: a blue accent on a blue canvas can't
+     pop against its own hue. Accents are bright — ink on them is dark. */
+  --accent: #4D9EFF;      /* action-primary */
+  --accent-deep: #6FB2FF; /* hover */
+  --on-accent: #06121F;   /* action-on-primary */
+  --gold: #F4B942;        /* accent-default — the logo's sun + badge, warm accents */
+  --success: #34D399;     /* live indicator */
 
   /* Text */
-  --text-primary: #050505;
-  --text-muted: #65676B;
+  --text-primary: #EDF2FA;
+  --text-muted: #9AA9BF;
 
   /* Status */
-  --warn-fg: #7A5D00;
-  --warn-bg: #FFF3CD;
-  --danger: #F02849;
+  --warn-fg: var(--gold);
+  --danger: #FB7185;
 
-  /* Elevation — the only shadow in the panel */
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.08);
-
-  /* Type */
-  --font-ui: "Manrope", system-ui, sans-serif;
+  /* Type — Space Grotesk carries display/title/value; Inter carries every body,
+     label and meta string; mono is the filename field alone. */
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
 
-  /* Inline-SVG data-URIs */
-  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%231877F2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
-  --dl-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14' fill='none' stroke='%23FFFFFF' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 2.5V9'/%3E%3Cpath d='M4 6 7 9 10 6'/%3E%3Cpath d='M3 11.5h8'/%3E%3C/svg%3E");
+  /* Geometry, lifted from the nodes. */
+  --r-xl: 24px;   /* the panel frame */
+  --r-card: 18px; /* media cards, the preview */
+  --r-tray: 16px;
+  --r-tile: 14px; /* settings group cards */
+  --r-thumb: 13px;
+  --r-md: 12px;   /* primary buttons, metric tiles */
+  --r-input: 10px;
+  --r-pill: 999px;
+  --pad: 20px;    /* the frame's own side inset */
+
+  /* Placeholder wash for media that hasn't painted a real thumbnail yet. */
+  --media-wash: linear-gradient(120deg, #4D9EFF 0%, #38BDF8 100%);
+
+  /* Inline-SVG data-URIs — stroke colors are baked in and can't read a var, so
+     they must be updated by hand whenever --accent / --on-accent move. */
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%239AA9BF' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+  --check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2306121F' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  --download: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23EDF2FA' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12m0 0 4-4m-4 4-4-4M4 21h16'/%3E%3C/svg%3E");
+
+  /* Depth — three planes instead of one. Surfaces LIFT off the canvas (a top edge
+     that catches light + a drop shadow + a faint top-lighter gradient); controls
+     RECESS into it (inset shadow); grain gives the canvas its paper tooth. */
+  --grad-card: linear-gradient(180deg, #1C2537 0%, #161D2B 100%);
+  --grad-tint: linear-gradient(180deg, #2B3852 0%, #222E44 100%);
+  --grad-accent: linear-gradient(180deg, #5CA7FF 0%, #4D9EFF 100%);
+  --edge-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --lift-1: 0 1px 2px rgba(0, 0, 0, 0.24), 0 10px 22px -14px rgba(0, 0, 0, 0.7);
+  --lift-2: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 34px -16px rgba(0, 0, 0, 0.72);
+  --recess: inset 0 1px 2px rgba(0, 0, 0, 0.32);
+  --glow-accent: 0 6px 20px -6px rgba(77, 158, 255, 0.5);
+  /* Monochrome fractal grain, tiled; blended soft-light at low opacity so it adds
+     tooth without lifting the black. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='150' height='150' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }
 
+/* The panel doubles as a toolbar popup, which sizes to content — so 400px is the
+   floor the popup opens at. Narrower, the grid still works; the cards just shrink. */
 body {
   margin: 0;
-  min-width: 340px; /* toolbar popup sizes to content; keep it usably wide */
-  font-family: var(--font-ui);
-  background: var(--canvas);
+  min-width: 400px;
+  font-family: var(--font-body);
   color: var(--text-primary);
+  /* A vertical light-to-dark fall plus a cool light from the top and a warm one
+     from the top-left, so the top reads as lit and the bottom recedes. */
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(130% 55% at 50% -8%, rgba(77, 158, 255, 0.08), transparent 60%),
+    radial-gradient(90% 45% at 6% -6%, rgba(244, 185, 66, 0.05), transparent 55%),
+    linear-gradient(180deg, #121A2A 0%, var(--canvas) 46%, #0A1017 100%);
+  background-attachment: fixed;
   display: flex;
   flex-direction: column;
 }
-
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 11px 12px;
-  background: var(--card);
-  border-bottom: 1px solid var(--card-line);
-  position: sticky;
-  top: 0;
-  z-index: 2;
+/* Paper tooth over the canvas only — it sits below the content layer, so it
+   textures the negative space between the lifted cards, never the text. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: var(--grain);
+  background-size: 150px 150px;
+  opacity: 0.5;
+  mix-blend-mode: soft-light;
+  pointer-events: none;
 }
 
-h1 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 800;
-  color: var(--text-primary);
+.app {
+  position: relative;
+  z-index: 1; /* above the grain layer, so cards and text stay crisp */
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px var(--pad) 0;
 }
 
-.mark {
-  width: 20px;
-  height: 20px;
+/* ── Brand header ───────────────────────────────────────────────────────────── */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   flex: none;
 }
 
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.brand-logo { position: relative; display: block; flex: none; line-height: 0; }
+/* A halo behind the mark — the light source the whole panel is lit by, in the
+   extension's own blue with a gold warmth, matching the logo's frame + badge. */
+.brand-logo::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  z-index: -1;
+  background: radial-gradient(circle at 50% 45%, rgba(77, 158, 255, 0.32), rgba(244, 185, 66, 0.14) 48%, transparent 70%);
+  filter: blur(7px);
 }
+.brand-logo svg { display: block; width: 42px; height: 42px; }
 
-.lang-toggle {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: 999px;
+.brand-text { flex: 1; min-width: 0; }
+.brand-text h1 {
+  margin: 0;
+  font: 500 18px/24px var(--font-display);
+  letter-spacing: -0.2px;
+  color: var(--text-primary);
+}
+.brand-tagline {
+  margin: 0;
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-muted);
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.lang-toggle button {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: var(--font-ui);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  padding: 4px 10px;
-  cursor: pointer;
-}
-
-.lang-toggle button.is-active {
-  background: var(--blue);
-  color: var(--on-accent);
-}
-
-.btn-ghost {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--text-muted);
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 5px 12px;
-  cursor: pointer;
-}
-
-.btn-ghost:hover {
-  border-color: var(--blue);
-  color: var(--blue);
-}
-
-/* Round icon button (gear / close). */
-.icon-btn {
-  display: inline-flex;
+/* Settings gear (header) and close (settings) share the round icon-button. */
+.gear-btn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 26px;
   padding: 0;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 8px;
   color: var(--text-muted);
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-pill);
   cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.gear-btn { background: var(--grad-card); box-shadow: var(--edge-top); }
+.gear-btn:hover { color: var(--accent); border-color: var(--accent); }
+.gear-btn svg { width: 19px; height: 19px; display: block; }
+.gear-btn:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+
+/* ── View switch + media filters (same pill) ────────────────────────────────── */
+.views,
+.filters {
+  display: flex;
+  gap: 8px;
+  flex: none;
 }
 
-.icon-btn:hover {
-  border-color: var(--blue);
-  color: var(--blue);
+.view-pill,
+.chip {
+  flex: 1 0 0;
+  min-width: 0;
+  height: 44px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 600 12px/1 var(--font-body);
+  color: var(--text-muted);
+  background: var(--grad-card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-pill);
+  box-shadow: var(--edge-top);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
 }
-
-.icon-btn svg {
-  width: 15px;
-  height: 15px;
-  display: block;
+.view-pill:hover,
+.chip:hover { color: var(--text-primary); border-color: rgba(255, 255, 255, 0.14); }
+.view-pill[aria-pressed="true"],
+.chip[aria-pressed="true"] {
+  color: var(--on-accent);
+  background: var(--grad-accent);
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), var(--glow-accent);
 }
+.view-pill:focus-visible,
+.chip:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
 
-/* Settings — a full-panel sheet (the panel is too narrow for a modal). */
-.settings-sheet {
-  position: fixed;
-  inset: 0;
-  z-index: 5;
-  background: var(--canvas);
+/* ── Degraded banner ────────────────────────────────────────────────────────── */
+.banner {
+  flex: none;
+  margin: 0;
+  padding: 10px 12px;
+  font: 400 11px/15px var(--font-body);
+  color: var(--text-primary);
+  background: rgba(251, 113, 133, 0.12);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-input);
+}
+.banner[hidden] { display: none; }
+
+/* ── Views ──────────────────────────────────────────────────────────────────── */
+.view {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 16px;
+  padding-bottom: var(--pad);
 }
+.view[hidden] { display: none; }
 
-.settings-sheet[hidden] {
-  display: none;
+.spacer { flex: 1 1 auto; }
+#view-grid .spacer { display: none; } /* the scrolling list owns the free space */
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  padding: 0 24px;
 }
+.empty[hidden] { display: none; }
+.empty h2 { margin: 0; font: 500 18px/24px var(--font-display); letter-spacing: -0.2px; }
+.empty p { margin: 0; max-width: 260px; font: 400 13px/19px var(--font-body); color: var(--text-muted); }
 
-.settings-head {
+/* ── Now Playing ────────────────────────────────────────────────────────────── */
+.now {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.now[hidden] { display: none; }
+
+.now-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 12px;
-  background: var(--card);
-  border-bottom: 1px solid var(--card-line);
+  flex: none;
 }
-
-.settings-head h2 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 800;
+.now-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font: 600 12px/16px var(--font-body);
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
   color: var(--text-primary);
 }
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5);
+  animation: live-pulse 2s ease-out infinite;
+}
+@keyframes live-pulse {
+  70% { box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+}
+.now-source { font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
 
-.settings-body {
-  padding: 6px 12px;
-  overflow-y: auto;
+.preview {
+  position: relative;
+  flex: none;
+  height: 208px;
+  border-radius: var(--r-card);
+  border: 1px solid var(--card-line);
+  background: var(--media-wash);
+  overflow: hidden;
+  box-shadow: var(--edge-top), var(--lift-2);
+}
+/* A soft diagonal sheen so the preview reads as a glossy mounted photo, not a
+   flat tile. Sits above the artwork; the corner badges stay legible under it. */
+.preview::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(158deg, rgba(255, 255, 255, 0.16) 0%, transparent 38%);
+}
+.preview img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Play disc — decorative. The panel can't drive Facebook's player, so there is
+   no live progress track; the disc marks the tile as a video and nothing more. */
+.preview.is-video::after {
+  content: "▶";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 58px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--accent);
+  font-size: 16px;
+  text-indent: 3px;
+  pointer-events: none;
+}
+.preview .preview-play { display: none; } /* ::after draws it; the inline glyph is a fallback */
+.media-badge {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font: 600 12px/1 var(--font-body);
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  background: rgba(8, 18, 41, 0.82);
+  border-radius: var(--r-tile);
+}
+.media-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.preview-dur {
+  position: absolute;
+  left: 13px;
+  bottom: 13px;
+  padding: 3px 8px;
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-primary);
+  background: rgba(8, 18, 41, 0.82);
+  border-radius: 8px;
+}
+.preview-dur:empty { display: none; }
+
+.now-identity { flex: none; display: flex; flex-direction: column; gap: 4px; }
+.now-title { margin: 0; font: 500 18px/24px var(--font-display); letter-spacing: -0.2px; }
+.now-sub { margin: 0; font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
+
+.metrics { display: flex; gap: 8px; flex: none; }
+.metric {
+  flex: 1 0 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px;
+  background: var(--grad-card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-md);
+  box-shadow: var(--edge-top), 0 4px 10px -6px rgba(0, 0, 0, 0.55);
+}
+.metric-label {
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.metric-value {
+  font: 500 18px/24px var(--font-display);
+  letter-spacing: -0.2px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.settings-row {
+.quality { flex: none; display: flex; flex-direction: column; gap: 8px; }
+.quality-head { display: flex; align-items: center; justify-content: space-between; }
+.quality-label { font: 600 12px/16px var(--font-body); letter-spacing: 0.2px; color: var(--text-primary); }
+.quality-count { font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
+
+/* ── Native select, styled ──────────────────────────────────────────────────── */
+.select-wrap { position: relative; }
+.select {
+  width: 100%;
+  height: 34px;
+  padding: 0 30px 0 12px;
+  font: 600 12px/1 var(--font-body);
+  color: var(--text-primary);
+  background: var(--tint);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-input);
+  box-shadow: var(--recess);
+  appearance: none;
+  background-image: var(--chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  cursor: pointer;
+}
+.select:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--recess), 0 0 0 3px rgba(77, 158, 255, 0.18); }
+.select option { background: var(--card); color: var(--text-primary); }
+/* Now Playing's quality field is the taller, accent-ringed selector. */
+#now-qselect {
+  height: 48px;
+  font: 400 14px/20px var(--font-body);
+  border-color: var(--accent);
+  box-shadow: var(--recess), 0 0 0 3px rgba(77, 158, 255, 0.1);
+}
+
+/* ── Primary + ghost buttons ────────────────────────────────────────────────── */
+.btn-primary {
+  flex: none;
+  width: 100%;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  font: 600 13px/1 var(--font-body);
+  color: var(--on-accent);
+  background: var(--grad-accent);
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), var(--glow-accent);
+  transition: box-shadow 0.14s ease, filter 0.14s ease;
+}
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 8px 26px -6px rgba(77, 158, 255, 0.62);
+}
+.btn-primary:disabled { opacity: 0.55; cursor: default; }
+.btn-primary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+
+.btn-ghost {
+  height: 34px;
+  padding: 0 16px;
+  font: 600 13px/1 var(--font-body);
+  color: var(--text-primary);
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.btn-ghost:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+
+.link-btn {
+  padding: 0;
+  font: 600 12px/16px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.link-btn:hover { color: var(--accent-deep); }
+.link-btn:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; border-radius: 4px; }
+
+/* ── Library / Saved grid ───────────────────────────────────────────────────── */
+.grid-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex: none;
+}
+.grid-title { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.grid-title h2 { margin: 0; font: 500 18px/24px var(--font-display); letter-spacing: -0.2px; }
+.grid-title p { margin: 0; font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
+.grid-count { font: 600 12px/16px var(--font-body); letter-spacing: 0.2px; color: var(--accent); white-space: nowrap; }
+
+.picks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  font: 600 12px/16px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-primary);
+}
+.picks-head[hidden] { display: none; }
+
+.grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  align-content: start;
+}
+.grid:empty { display: none; }
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  background: var(--grad-card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-card);
+  box-shadow: var(--edge-top), var(--lift-1);
+  min-width: 0;
+  transition: box-shadow 0.14s ease, transform 0.14s ease;
+}
+.card:hover { transform: translateY(-1px); box-shadow: var(--edge-top), var(--lift-2); }
+/* The playing card catches the accent — a hairline ring plus a soft blue bloom. */
+.card.is-live {
+  border-color: transparent;
+  box-shadow: var(--edge-top), var(--lift-1), 0 0 0 1px var(--accent), 0 6px 20px -8px rgba(77, 158, 255, 0.45);
+}
+
+.card-thumb {
+  position: relative;
+  height: 120px;
+  border-radius: var(--r-thumb);
+  background: var(--media-wash);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+}
+.card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* Play badge — a light disc holding a blue glyph, centred in a video thumbnail. */
+.card-thumb.is-video::after {
+  content: "▶";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--accent);
+  font-size: 10px;
+  text-indent: 2px;
+  pointer-events: none;
+}
+
+/* Selection check, top-right. Invisible until hovered or picked, always reachable. */
+.pick {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+  border-radius: 9px;
+  background: rgba(6, 18, 31, 0.35);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.card:hover .pick,
+.pick:focus-visible { opacity: 1; }
+.pick[aria-pressed="true"] {
+  opacity: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+  background-image: var(--check);
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.pick:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
+.pick:disabled { opacity: 0; cursor: default; } /* nothing downloadable → no pick */
+
+/* Per-card download, bottom-right of the thumbnail. */
+.card-dl {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--canvas);
+  border: 1px solid var(--card-line);
+  border-radius: 16px;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.card-dl::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  background: var(--download) center / contain no-repeat;
+}
+.card-dl:hover:not(:disabled) { border-color: var(--accent); }
+.card-dl:disabled { opacity: 0.5; cursor: default; }
+.card-dl.busy { border-color: var(--accent); }
+.card-dl.busy::after {
+  background: none;
+  border: 2px solid var(--card-line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.card-title {
+  margin: 0;
+  font: 500 13px/18px var(--font-display);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-meta {
+  margin: 0;
+  font: 400 10px/14px var(--font-body);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-meta .tag { color: var(--warn-fg); }
+.card-meta .tag.tag-fail { color: var(--danger); }
+
+/* ── Selection tray ─────────────────────────────────────────────────────────── */
+.tray {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 13px 2px;
-  border-bottom: 1px solid var(--card-line);
-}
-
-.settings-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-/* Section heading inside the sheet. */
-.settings-group {
-  margin: 16px 2px 2px;
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--blue);
-}
-.settings-group:first-child {
-  margin-top: 6px;
-}
-
-/* Stacked row: label above a full-width control (the filename field). */
-.settings-row.col {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-}
-
-.lang-toggle.is-disabled {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-/* Select + text input — quiet white fields on the grey sheet. */
-.settings-select,
-.settings-input {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 6px 9px;
-  cursor: pointer;
-}
-.settings-select {
-  min-width: 108px;
-  appearance: none;
-  padding-right: 26px;
-  background-image: var(--chevron);
-  background-repeat: no-repeat;
-  background-position: right 8px center;
-}
-.settings-input {
-  width: 100%;
-  cursor: text;
-}
-.settings-select:focus,
-.settings-input:focus {
-  outline: none;
-  border-color: var(--blue);
-  box-shadow: 0 0 0 2px var(--tint-deep);
-}
-.settings-select option {
-  background: var(--card);
-  color: var(--text-primary);
-}
-
-/* Toggle switch for boolean settings — the FB pill toggle. */
-.switch {
-  position: relative;
-  display: inline-block;
-  width: 36px;
-  height: 20px;
   flex: none;
+  height: 72px;
+  padding: 0 12px 0 14px;
+  background: var(--grad-tint);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-tray);
+  box-shadow: var(--edge-top), var(--lift-2);
 }
-.switch input {
-  position: absolute;
-  opacity: 0;
-  width: 100%;
-  height: 100%;
+.tray[hidden] { display: none; }
+.tray-text { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.tray-count { margin: 0; font: 600 12px/16px var(--font-body); letter-spacing: 0.2px; white-space: nowrap; }
+.tray-meta {
   margin: 0;
-  cursor: pointer;
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.switch .track {
+.tray-btn { width: auto; min-width: 178px; }
+
+/* ── Settings overlay ───────────────────────────────────────────────────────── */
+.settings-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background-color: var(--canvas);
+  background-image:
+    radial-gradient(120% 40% at 50% -6%, rgba(77, 158, 255, 0.07), transparent 60%),
+    linear-gradient(180deg, #121A2A 0%, var(--canvas) 46%, #0A1017 100%);
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.settings-sheet[hidden] { display: none; }
+
+.settings-head { display: flex; align-items: center; justify-content: space-between; flex: none; }
+.settings-title { display: flex; flex-direction: column; gap: 2px; }
+.settings-title h2 { margin: 0; font: 500 18px/24px var(--font-display); letter-spacing: -0.2px; }
+.settings-autosave { margin: 0; font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
+.settings-head .gear-btn { width: 40px; height: 40px; border-radius: 20px; }
+.settings-head .gear-btn svg { width: 18px; height: 18px; }
+
+.settings-body { display: flex; flex-direction: column; gap: 12px; }
+
+.set-section { display: flex; flex-direction: column; gap: 6px; }
+.set-label {
+  margin: 0;
+  font: 600 12px/16px var(--font-body);
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.set-card {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 12px;
+  background: var(--grad-card);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-tile);
+  box-shadow: var(--edge-top), var(--lift-1);
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  padding: 8px 0;
+}
+.set-row + .set-row { border-top: 1px solid var(--card-line); }
+.set-row.col { flex-direction: column; align-items: stretch; gap: 8px; }
+.set-row.two .set-copy { display: flex; flex-direction: column; gap: 1px; }
+.set-title { font: 600 12px/16px var(--font-body); letter-spacing: 0.2px; color: var(--text-primary); }
+.set-hint { font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
+.set-note {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-muted);
+  background: var(--tint);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-input);
+}
+
+.set-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  font: 400 12px/16px var(--font-body);
+  color: var(--text-primary);
+  background: var(--tint);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-input);
+  box-shadow: var(--recess);
+}
+.set-input.mono { font: 400 11px/16px var(--font-mono); }
+.set-input:focus-visible { outline: none; border-color: var(--accent); }
+.set-row .select { width: 118px; flex: none; }
+
+.settings-rights {
+  margin: 4px 0 0;
+  font: 400 11px/15px var(--font-body);
+  letter-spacing: 0.2px;
+  color: var(--text-muted);
+}
+
+/* ── Toggle switch ──────────────────────────────────────────────────────────── */
+.switch { position: relative; flex: none; width: 38px; height: 22px; }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.track {
   position: absolute;
   inset: 0;
-  border-radius: 999px;
-  background: var(--line);
-  transition: background 0.12s;
+  background: var(--tint);
+  border: 1px solid var(--card-line);
+  border-radius: var(--r-pill);
+  transition: background 0.14s ease;
+  pointer-events: none;
 }
-.switch .track::before {
+.track::before {
   content: "";
   position: absolute;
   top: 2px;
@@ -315,387 +828,31 @@ h1 {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--card);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 0.12s;
+  background: var(--text-muted);
+  transition: transform 0.14s ease, background 0.14s ease;
 }
-.switch input:checked + .track {
-  background: var(--blue);
-}
-.switch input:checked + .track::before {
-  transform: translateX(16px);
-}
-.switch input:focus-visible + .track {
-  box-shadow: 0 0 0 2px var(--tint-deep);
-}
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::before { transform: translateX(16px); background: var(--on-accent); }
+.switch input:focus-visible + .track { box-shadow: 0 0 0 2px var(--accent-deep); }
 
-#filters {
+/* ── Language segmented (EN/ES) ─────────────────────────────────────────────── */
+.lang-toggle {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 10px 12px 4px;
-}
-
-/* Filter pills — grey at rest, solid blue when chosen. */
-.chip {
-  background: var(--card-line);
-  border: none;
-  border-radius: 999px;
-  color: var(--text-primary);
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-
-.chip:hover {
-  background: var(--line);
-}
-
-.chip.is-active {
-  background: var(--blue);
-  color: var(--on-accent);
-}
-
-main {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px 12px 12px;
-  min-height: 60px;
-}
-
-/* Media rows — white cards on the grey canvas. */
-.item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  margin-bottom: 8px;
-  background: var(--card);
-  border: 1px solid var(--card-line);
-  border-radius: 14px;
-  box-shadow: var(--shadow-card);
-}
-
-/* Every row listed under "Now playing" is live capture — blue wayfinding ring. */
-#list.is-live .item {
-  border-color: var(--blue);
-}
-
-.thumb {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 48px;
-  background: var(--canvas);
-  border: 1px solid var(--card-line);
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  overflow: hidden;
-  position: relative;
-}
-
-.thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-/* Round play badge on video thumbnails. */
-.thumb.is-video::after {
-  content: "▶";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 20px;
-  height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  color: #FFFFFF;
-  font-size: 8px;
-  text-indent: 1px; /* optically center the ▶ glyph */
-  pointer-events: none;
-}
-
-/* Save-cover badge (poster-only download). Non-hit-testable while invisible so a
-   corner click can't trigger an unseen download; z-index wins over the ::after play badge. */
-.thumb .cover-dl {
-  position: absolute;
-  right: 2px;
-  bottom: 2px;
-  z-index: 2;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--blue);
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-}
-
-.thumb:hover .cover-dl,
-.thumb .cover-dl:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.thumb .cover-dl:hover {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: var(--on-accent);
-}
-
-.thumb .cover-dl:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.meta { flex: 1; min-width: 0; }
-
-.meta .kind {
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-primary);
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.meta .sub {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 4px;
-}
-
-/* Video duration chip on the kind line — mono on the grey step. */
-.meta .kind .dur {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  background: var(--canvas);
-  border-radius: 6px;
-  padding: 1px 6px;
-}
-
-.tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  border-radius: 999px;
-  padding: 2px 8px;
+  padding: 2px;
   background: var(--tint);
-  color: var(--blue-deep);
-}
-
-.tag::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: var(--blue);
-}
-
-/* TS toggles this tag via the [hidden] attribute — must win over display:inline-flex. */
-.tag[hidden] { display: none; }
-
-.tag-warn {
-  background: var(--warn-bg);
-  color: var(--warn-fg);
-}
-
-.tag-warn::before { background: var(--warn-fg); }
-
-/* Quality picker (native <select>) — the CHOOSE step, on the blue tint. */
-.sub .quality {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  max-width: 100%;
-  background-color: var(--tint);
-  background-image: var(--chevron);
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  color: var(--blue);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  border: none;
-  border-radius: 10px;
-  padding: 8px 28px 8px 11px;
-  cursor: pointer;
-}
-
-.sub .quality:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--tint-deep);
-}
-
-.sub .quality option {
-  background: var(--card);
-  color: var(--text-primary);
-}
-
-/* The SAVE step — a download is a save, so the primary key is green. */
-.dl {
-  flex: 1 1 100%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  border: none;
-  border-radius: 999px;
-  background: var(--green);
-  color: var(--on-accent);
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 10px 14px;
-  cursor: pointer;
-  transition: background 0.12s ease;
-}
-
-.dl::before {
-  content: "";
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  background: var(--dl-arrow) no-repeat center / 14px 14px;
-}
-
-.dl:hover {
-  background: var(--green-deep);
-}
-
-/* Covers Merging… / Saving… / Unavailable busy+disabled states — quiet grey pill. */
-.dl:disabled {
-  background: var(--card-line);
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-weight: 500;
-  cursor: not-allowed;
-}
-
-.dl:disabled::before { display: none; }
-
-/* Degraded browser — an explained fallback, never a mystery. */
-.banner {
-  margin: 8px 12px 4px;
-  padding: 11px 13px 11px 15px;
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1.45;
-  color: var(--text-primary);
-  background: var(--tint);
-  border: none;
-  border-left: 3px solid var(--blue);
-  border-radius: 12px;
-}
-
-.banner[hidden] { display: none; }
-
-/* Empty state — step 1 of the route, waiting for media. */
-.empty {
-  margin: 8px 12px;
-  padding: 26px 22px;
-  text-align: center;
-  background: var(--card);
   border: 1px solid var(--card-line);
-  border-radius: 14px;
-  box-shadow: var(--shadow-card);
+  border-radius: 17px;
 }
-
-.empty::before {
-  content: "1";
-  width: 32px;
-  height: 32px;
-  margin: 0 auto 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--tint);
-  color: var(--blue);
-  font-family: var(--font-ui);
-  font-size: 14px;
-  font-weight: 800;
-}
-
-.empty::after {
-  content: "detect · choose · save";
-  display: block;
-  margin-top: 14px;
-  font-family: var(--font-mono);
-  font-size: 8px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+.lang-toggle button {
+  width: 44px;
+  height: 28px;
+  font: 600 12px/1 var(--font-body);
+  letter-spacing: 0.2px;
   color: var(--text-muted);
+  background: none;
+  border: none;
+  border-radius: 15px;
+  cursor: pointer;
 }
-
-.empty h2 {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 800;
-  color: var(--text-primary);
-}
-
-.empty p {
-  margin: 0;
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-
-.empty[hidden] { display: none; }
-
-footer {
-  border-top: 1px solid var(--card-line);
-  padding: 10px 14px;
-}
-
-.note {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-  line-height: 1.6;
-  text-align: center;
-}
+.lang-toggle button.is-active { background: var(--accent); color: var(--on-accent); }
+.lang-toggle.is-disabled { opacity: 0.4; pointer-events: none; }

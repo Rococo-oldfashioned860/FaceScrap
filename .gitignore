@@ -35,3 +35,8 @@ Thumbs.db
 .parcel-cache/
 .eslintcache
 
+# Editor and local tooling state
+.claude/
+.omx/
+.remember/
+

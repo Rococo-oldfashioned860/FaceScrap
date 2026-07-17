@@ -7,139 +7,266 @@
     <title>FaceScrap</title>
   </head>
   <body>
-    <header>
-      <h1>
-        <svg class="mark" width="20" height="20" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-          <!-- "Flow route": the page (origin ring) loops out through the D-bowl
-               and lands as a saved file — green destination node, filed square. -->
-          <path d="M8.5 7C17.5 7 23.5 10.5 23.5 16C23.5 21.5 17.5 25 8.5 25" stroke="#166FE5" stroke-width="2" stroke-linecap="round" />
-          <path d="M8.5 10.5V21.5" stroke="#166FE5" stroke-width="1.5" stroke-linecap="round" />
-          <circle cx="8.5" cy="7" r="3.5" fill="#FFFFFF" stroke="#166FE5" stroke-width="1.5" />
-          <circle cx="23.5" cy="16" r="3.5" fill="#42B72A" />
-          <rect x="5.5" y="22" width="6" height="6" rx="1.5" fill="#FCA7B5" />
-        </svg>
-        FaceScrap
-      </h1>
-      <div class="header-right">
-        <button id="clear" class="btn-ghost" data-i18n="clear" data-i18n-title="titleClear">Clear</button>
-        <button id="settings-open" class="icon-btn" type="button" data-i18n-title="titleSettings" data-i18n-aria="titleSettings" aria-label="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <!-- Three top-level views (Now Playing / Library / Saved) share this document;
+         the view switch toggles which is visible. Settings is an overlay. -->
+    <div class="app">
+      <header class="brand">
+        <span class="brand-logo" aria-hidden="true">
+          <!-- Logo mark. Must stay in step with scripts/generate-icons.mjs, which
+               redraws this same mark as the toolbar PNG. -->
+          <svg width="30" height="30" viewBox="0 0 32 32" fill="none">
+            <rect x="3" y="3" width="26" height="26" rx="7" fill="#EEF3FB" stroke="#4D9EFF" stroke-width="2" />
+            <clipPath id="fs-card"><rect x="4" y="4" width="24" height="24" rx="6" /></clipPath>
+            <g clip-path="url(#fs-card)">
+              <circle cx="21.5" cy="11.5" r="3.1" fill="#F4B942" />
+              <path d="M12 13 L20 24.5 L4 24.5 Z" fill="#7C9CFF" />
+              <path d="M19.5 16.5 L28 24.5 L11 24.5 Z" fill="#4D9EFF" />
+            </g>
+            <rect x="21.5" y="21.5" width="8.5" height="8.5" rx="2.5" fill="#F4B942" />
+            <path d="M24.9 24.3 L27.6 25.9 L24.9 27.5 Z" fill="#17213C" />
+          </svg>
+        </span>
+        <div class="brand-text">
+          <h1>FaceScrap</h1>
+          <p class="brand-tagline" data-i18n="brandTagline">facebook memories, neatly saved</p>
+        </div>
+        <button id="settings-open" class="gear-btn" type="button" data-i18n-title="titleSettings" data-i18n-aria="titleSettings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V15z" />
           </svg>
         </button>
-      </div>
-    </header>
+      </header>
 
+      <!-- aria-pressed carries the selected state; the CSS selects on it. -->
+      <nav id="views" class="views" aria-label="Views">
+        <button class="view-pill" type="button" data-view="now" aria-pressed="true" data-i18n="viewNowPlaying">Now Playing</button>
+        <button class="view-pill" type="button" data-view="library" aria-pressed="false" data-i18n="viewLibrary">Library</button>
+        <button class="view-pill" type="button" data-view="saved" aria-pressed="false" data-i18n="viewSaved">Saved</button>
+      </nav>
+
+      <p id="degraded" class="banner" hidden data-i18n="bannerDegraded">
+        This browser can't merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.
+      </p>
+
+      <!-- ── Now Playing ─────────────────────────────────────────────────────── -->
+      <section id="view-now" class="view">
+        <div id="now-empty" class="empty">
+          <h2 data-i18n="nowEmptyTitle">Nothing playing</h2>
+          <p data-i18n="nowEmptyBody">Play a reel or story on this tab, or open your Library.</p>
+        </div>
+
+        <div id="now-content" class="now" hidden>
+          <div class="now-status">
+            <span class="now-eyebrow"><i class="live-dot" aria-hidden="true"></i><span data-i18n="nowStatus">Now playing</span></span>
+            <span class="now-source" data-i18n="nowLive">Live from Facebook</span>
+          </div>
+
+          <div id="now-preview" class="preview">
+            <span id="now-badge" class="media-badge"></span>
+            <span class="preview-play" aria-hidden="true">▶</span>
+            <span id="now-dur" class="preview-dur"></span>
+          </div>
+
+          <div class="now-identity">
+            <h2 id="now-title" class="now-title"></h2>
+            <p id="now-sub" class="now-sub"></p>
+          </div>
+
+          <div class="metrics">
+            <div class="metric">
+              <span class="metric-label" data-i18n="metaFormat">Format</span>
+              <span id="m-format" class="metric-value"></span>
+            </div>
+            <div class="metric">
+              <span class="metric-label" data-i18n="metaDuration">Duration</span>
+              <span id="m-duration" class="metric-value"></span>
+            </div>
+            <div class="metric">
+              <span class="metric-label" data-i18n="metaResolution">Resolution</span>
+              <span id="m-resolution" class="metric-value"></span>
+            </div>
+          </div>
+
+          <div id="now-quality" class="quality">
+            <div class="quality-head">
+              <span class="quality-label" data-i18n="videoQuality">Video quality</span>
+              <span id="now-qcount" class="quality-count"></span>
+            </div>
+            <div class="select-wrap">
+              <select id="now-qselect" class="select"></select>
+            </div>
+          </div>
+
+          <div class="spacer"></div>
+
+          <button id="now-download" class="btn-primary" type="button"></button>
+        </div>
+      </section>
+
+      <!-- ── Library / Saved (one grid, data + heading swapped by the view) ────── -->
+      <section id="view-grid" class="view" hidden>
+        <div class="grid-head">
+          <div class="grid-title">
+            <h2 id="grid-title"></h2>
+            <p id="grid-sub"></p>
+          </div>
+          <span id="grid-count" class="grid-count"></span>
+        </div>
+
+        <nav id="filters" class="filters" aria-label="Media filters">
+          <button class="chip" type="button" data-filter="all" aria-pressed="true" data-i18n="filterAll">All</button>
+          <button class="chip" type="button" data-filter="video" aria-pressed="false" data-i18n="filterVideos">Videos</button>
+          <button class="chip" type="button" data-filter="image" aria-pressed="false" data-i18n="filterImages">Images</button>
+        </nav>
+
+        <div id="picks-head" class="picks-head">
+          <span data-i18n="yourPicks">Your picks</span>
+          <button id="select-all" class="link-btn" type="button" data-i18n="selectAll">Select all</button>
+        </div>
+
+        <main id="list" class="grid" aria-live="polite"></main>
+
+        <div id="grid-empty" class="empty" hidden>
+          <h2 id="grid-empty-title"></h2>
+          <p id="grid-empty-body"></p>
+        </div>
+
+        <div class="spacer"></div>
+
+        <div id="tray" class="tray" hidden>
+          <div class="tray-text">
+            <p id="tray-count" class="tray-count"></p>
+            <p id="tray-meta" class="tray-meta"></p>
+          </div>
+          <button id="bulk-dl" class="btn-primary tray-btn" type="button"></button>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── Settings overlay ─────────────────────────────────────────────────── -->
     <div id="settings" class="settings-sheet" hidden>
       <div class="settings-head">
-        <h2 data-i18n="settings">Settings</h2>
-        <button id="settings-close" class="icon-btn" type="button" data-i18n-aria="titleCloseSettings" aria-label="Close">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <div class="settings-title">
+          <h2 data-i18n="settings">Settings</h2>
+          <p class="settings-autosave" data-i18n="settingsAutosave">Changes save automatically</p>
+        </div>
+        <button id="settings-close" class="gear-btn" type="button" data-i18n-aria="titleCloseSettings" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M18 6 6 18" />
             <path d="m6 6 12 12" />
           </svg>
         </button>
       </div>
+
       <div class="settings-body">
-        <h3 class="settings-group" data-i18n="settingsDownloads">Downloads</h3>
-        <div class="settings-row col">
-          <span class="settings-label" data-i18n="settingsTemplate">Filename</span>
-          <input id="set-template" class="settings-input" type="text" spellcheck="false" autocomplete="off" maxlength="200" />
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsSubfolder">Save in "FaceScrap/" subfolder</span>
-          <label class="switch"><input id="set-subfolder" type="checkbox" /><span class="track"></span></label>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsQuality">Default quality</span>
-          <select id="set-quality" class="settings-select">
-            <option value="highest" data-i18n="qualityHighest">Highest</option>
-            <option value="lowest" data-i18n="qualityLowest">Lowest</option>
-            <option value="ask" data-i18n="qualityAsk">Ask</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsDirect">Direct download (no audio merge)</span>
-          <label class="switch"><input id="set-direct" type="checkbox" /><span class="track"></span></label>
-        </div>
-
-        <h3 class="settings-group" data-i18n="settingsPanel">Panel</h3>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsLanguage">Language</span>
-          <div id="lang" class="lang-toggle">
-            <button type="button" data-lang="en" class="is-active">EN</button>
-            <button type="button" data-lang="es">ES</button>
+        <section class="set-section">
+          <h3 class="set-label" data-i18n="settingsDownloads">Downloads</h3>
+          <div class="set-card">
+            <div class="set-row col">
+              <span class="set-title" data-i18n="settingsTemplate">Filename</span>
+              <input id="set-template" class="set-input mono" type="text" spellcheck="false" autocomplete="off" maxlength="200" />
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsSubfolder">Save in "FaceScrap/" subfolder</span>
+              <label class="switch"><input id="set-subfolder" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsQuality">Default quality</span>
+              <select id="set-quality" class="select">
+                <option value="highest" data-i18n="qualityHighest">Highest</option>
+                <option value="lowest" data-i18n="qualityLowest">Lowest</option>
+                <option value="ask" data-i18n="qualityAsk">Ask</option>
+              </select>
+            </div>
+            <div class="set-row two">
+              <span class="set-copy">
+                <span class="set-title" data-i18n="settingsDirect">Direct download</span>
+                <span class="set-hint" data-i18n="settingsDirectHint">May skip audio merge</span>
+              </span>
+              <label class="switch"><input id="set-direct" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <p class="set-note" data-i18n="settingsHdNote">
+              HD video + audio merge automatically. Direct download may skip audio.
+            </p>
           </div>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsFollowLang">Follow browser language</span>
-          <label class="switch"><input id="set-followlang" type="checkbox" /><span class="track"></span></label>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsOrder">List order</span>
-          <select id="set-order" class="settings-select">
-            <option value="newest" data-i18n="orderNewest">Newest first</option>
-            <option value="oldest" data-i18n="orderOldest">Oldest first</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsConfirmClear">Confirm before clearing</span>
-          <label class="switch"><input id="set-confirmclear" type="checkbox" /><span class="track"></span></label>
-        </div>
+        </section>
 
-        <h3 class="settings-group" data-i18n="settingsCapture">Capture</h3>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsVideosOnly">Videos only</span>
-          <label class="switch"><input id="set-videosonly" type="checkbox" /><span class="track"></span></label>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsMinRes">Minimum resolution</span>
-          <select id="set-minres" class="settings-select">
-            <option value="0" data-i18n="resNone">No minimum</option>
-            <option value="360">360p</option>
-            <option value="480">480p</option>
-            <option value="720">720p</option>
-            <option value="1080">1080p</option>
-          </select>
-        </div>
-        <div class="settings-row">
-          <span class="settings-label" data-i18n="settingsMaxItems">Max saved items</span>
-          <select id="set-maxitems" class="settings-select">
-            <option value="500">500</option>
-            <option value="1500">1500</option>
-            <option value="5000">5000</option>
-            <option value="0" data-i18n="maxUnlimited">Unlimited</option>
-          </select>
-        </div>
+        <section class="set-section">
+          <h3 class="set-label" data-i18n="settingsPanel">Panel</h3>
+          <div class="set-card">
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsLanguage">Language</span>
+              <div id="lang" class="lang-toggle">
+                <button type="button" data-lang="en" class="is-active">EN</button>
+                <button type="button" data-lang="es">ES</button>
+              </div>
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsFollowLang">Follow browser language</span>
+              <label class="switch"><input id="set-followlang" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsOrder">List order</span>
+              <select id="set-order" class="select">
+                <option value="newest" data-i18n="orderNewest">Newest first</option>
+                <option value="oldest" data-i18n="orderOldest">Oldest first</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="set-section">
+          <h3 class="set-label" data-i18n="settingsCapture">Capture</h3>
+          <div class="set-card">
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsVideosOnly">Videos only</span>
+              <label class="switch"><input id="set-videosonly" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsMinRes">Minimum resolution</span>
+              <select id="set-minres" class="select">
+                <option value="0" data-i18n="resNone">No minimum</option>
+                <option value="360">360p</option>
+                <option value="480">480p</option>
+                <option value="720">720p</option>
+                <option value="1080">1080p</option>
+              </select>
+            </div>
+          </div>
+        </section>
+
+        <section class="set-section">
+          <h3 class="set-label" data-i18n="settingsSavedData">Saved data</h3>
+          <div class="set-card">
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsMaxItems">Max saved items</span>
+              <select id="set-maxitems" class="select">
+                <option value="500">500</option>
+                <option value="1500">1500</option>
+                <option value="5000">5000</option>
+                <option value="0" data-i18n="maxUnlimited">Unlimited</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <span class="set-title" data-i18n="settingsConfirmClear">Confirm before clearing</span>
+              <label class="switch"><input id="set-confirmclear" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <div class="set-row two">
+              <span class="set-copy">
+                <span class="set-title" data-i18n="settingsClearList">Clear captured list</span>
+                <span class="set-hint" data-i18n="settingsClearHint">Library only · Saved stays</span>
+              </span>
+              <button id="clear" class="btn-ghost" type="button" data-i18n="clear">Clear</button>
+            </div>
+          </div>
+        </section>
+
+        <p class="settings-rights" data-i18n="settingsRights">
+          Only download content you have the rights to.
+        </p>
       </div>
     </div>
-
-    <nav id="filters">
-      <button class="chip is-active" data-filter="playing" data-i18n="filterPlaying">▶ Now playing</button>
-      <button class="chip" data-filter="all" data-i18n="filterAll">All</button>
-      <button class="chip" data-filter="video" data-i18n="filterVideos">Videos</button>
-      <button class="chip" data-filter="image" data-i18n="filterImages">Images</button>
-    </nav>
-
-    <p id="degraded" class="banner" hidden data-i18n="bannerDegraded">
-      This browser can't merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.
-    </p>
-
-    <main id="list" aria-live="polite"></main>
-
-    <div id="empty" class="empty">
-      <h2 data-i18n="emptyTitle">No signal</h2>
-      <p data-i18n="emptyState">
-        Play a reel or story. You'll see only what you're watching now — if something is missing, check "All".
-      </p>
-    </div>
-
-    <footer>
-      <p class="note" data-i18n="footerNote">
-        HD videos are merged with audio automatically. Only download content you have the rights to.
-      </p>
-    </footer>
 
     <script src="sidepanel.js"></script>
   </body>

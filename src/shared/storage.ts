@@ -189,11 +189,45 @@ export async function getBind(tabId: number): Promise<BindState | null> {
   return raw;
 }
 
-/** Remove all per-tab state (media list + now-playing + recent + bindings).
+// --- Ids already downloaded from this tab (the panel's "Saved" filter) ---
+// Ids only, never items: the media list already holds those, and this must stay
+// cheap enough to keep for a whole session. Persisted (not panel-local) so the
+// filter still tells the truth after the panel is closed and reopened.
+
+const savedKey = (tabId: number): string => `saved_${tabId}`;
+// Insertion-ordered, so the cap below evicts the oldest saves first.
+const SAVED_MAX = 2000;
+const enqueueSaved = serialQueue();
+
+/** Mark ids as downloaded. Idempotent: re-saving an id keeps its first position. */
+export function addSaved(tabId: number, ids: string[]): Promise<void> {
+  return enqueueSaved(
+    async () => {
+      const key = savedKey(tabId);
+      const cur = await readKey<string[]>(key, []);
+      const next = [...new Set([...cur, ...ids])];
+      if (next.length > SAVED_MAX) next.splice(0, next.length - SAVED_MAX);
+      await chrome.storage.session.set({ [key]: next });
+    },
+    (err) => console.error('[FaceScrap] saved write failed', err),
+  );
+}
+
+export async function getSaved(tabId: number): Promise<string[]> {
+  const raw = await readKey<unknown>(savedKey(tabId), []);
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/** Remove the per-tab CAPTURE state (media list + now-playing + recent + bindings).
  *  Each key's removal is serialized through the SAME chain that writes it: an
  *  in-flight read-merge-write that started before the wipe must not land after
  *  it (resurrecting cleared items), nor may a late clear erase captures from
- *  the page just navigated to. */
+ *  the page just navigated to.
+ *
+ *  saved_ is deliberately NOT touched: it is the tab's download history, which
+ *  outlives both a page navigation and the "Clear captured list" button (whose
+ *  UI promises "Saved stays"). It is bounded by SAVED_MAX and, being in
+ *  storage.session, cleared when the browser session ends. */
 export function clearTab(tabId: number): Promise<void> {
   const fail = (err: unknown): void => console.error('[FaceScrap] storage clear failed', err);
   return Promise.all([

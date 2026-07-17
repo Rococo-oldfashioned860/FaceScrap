@@ -1,46 +1,97 @@
 // Only panel-rendered strings live here; service-worker/offscreen errors stay console-only English.
-// Pure module (no chrome.*) so it bundles in any context and is unit-testable.
+// Pure module (no chrome.*) so it bundles in any context.
 
 export type Lang = 'en' | 'es';
 
 export type MsgKey =
-  | 'clear'
-  | 'filterPlaying'
+  | 'brandTagline'
+  // View switch (the three top-level pills).
+  | 'viewNowPlaying'
+  | 'viewLibrary'
+  | 'viewSaved'
+  // Now Playing.
+  | 'nowStatus'
+  | 'nowLive'
+  | 'nowEmptyTitle'
+  | 'nowEmptyBody'
+  | 'videoQuality'
+  // Count strings keep `{n}` inline and ship a `…One` twin instead of pulling in
+  // plural rules: EN and ES both split at exactly one, and that is the whole need.
+  | 'qualityOptions'
+  | 'qualityOptionsOne'
+  | 'piecesInPost'
+  | 'piecesInPostOne'
+  | 'metaFormat'
+  | 'metaDuration'
+  | 'metaResolution'
+  // Download button states (Now Playing's single action and each card's button).
+  | 'downloadKind'
+  | 'downloadMerging'
+  | 'downloadSaving'
+  | 'downloadRetry'
+  | 'downloadItem'
+  | 'unavailable'
+  // Library / Saved grid.
+  | 'libraryTitle'
+  | 'librarySubtitle'
+  | 'savedTitle'
+  | 'savedSubtitle'
+  | 'foundCount'
+  | 'foundCountOne'
   | 'filterAll'
   | 'filterVideos'
   | 'filterImages'
-  | 'emptyTitle'
-  | 'emptyState'
-  | 'footerNote'
-  | 'bannerDegraded'
-  | 'download'
-  | 'downloadWithAudio'
-  | 'merging'
-  | 'retry'
-  | 'unavailable'
-  | 'saving'
-  | 'saveCover'
+  | 'yourPicks'
+  | 'selectAll'
+  | 'deselectAll'
+  | 'selectItem'
+  | 'cardPhoto'
+  | 'libraryEmptyTitle'
+  | 'libraryEmptyBody'
+  | 'savedEmptyTitle'
+  | 'savedEmptyBody'
+  // Selection tray.
+  | 'selectedCount'
+  | 'selectedCountOne'
+  | 'downloadSelected'
+  | 'bulkBusy'
+  // Composition words ("video + image"). Lowercase and singular: they are joined
+  // into a phrase, never shown alone.
+  | 'composeVideo'
+  | 'composeImage'
+  | 'composeAudio'
+  // Card tags.
   | 'tagMayLackAudio'
   | 'tagAudioTrack'
+  | 'tagFailed'
   | 'titleBlobUnavailable'
-  | 'titleClear'
+  | 'bannerDegraded'
+  // Settings.
   | 'settings'
-  | 'settingsLanguage'
+  | 'settingsAutosave'
   | 'titleSettings'
   | 'titleCloseSettings'
   | 'settingsDownloads'
   | 'settingsPanel'
   | 'settingsCapture'
+  | 'settingsSavedData'
   | 'settingsTemplate'
   | 'settingsSubfolder'
   | 'settingsQuality'
   | 'settingsDirect'
+  | 'settingsDirectHint'
+  | 'settingsHdNote'
+  | 'settingsLanguage'
   | 'settingsFollowLang'
   | 'settingsOrder'
-  | 'settingsConfirmClear'
   | 'settingsVideosOnly'
   | 'settingsMinRes'
   | 'settingsMaxItems'
+  | 'settingsConfirmClear'
+  | 'settingsClearList'
+  | 'settingsClearHint'
+  | 'settingsRights'
+  | 'clear'
   | 'qualityHighest'
   | 'qualityLowest'
   | 'qualityAsk'
@@ -49,6 +100,7 @@ export type MsgKey =
   | 'resNone'
   | 'maxUnlimited'
   | 'confirmClearPrompt'
+  // Source + kind labels.
   | 'sourceReel'
   | 'sourceStory'
   | 'sourceHighlight'
@@ -60,46 +112,84 @@ export type MsgKey =
 
 const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
   en: {
-    clear: 'Clear',
-    filterPlaying: '▶ Now playing',
+    brandTagline: 'facebook memories, neatly saved',
+    viewNowPlaying: 'Now Playing',
+    viewLibrary: 'Library',
+    viewSaved: 'Saved',
+    nowStatus: 'Now playing',
+    nowLive: 'Live from Facebook',
+    nowEmptyTitle: 'Nothing playing',
+    nowEmptyBody: 'Play a reel or story on this tab, or open your Library.',
+    videoQuality: 'Video quality',
+    qualityOptions: '{n} options',
+    qualityOptionsOne: '1 option',
+    piecesInPost: '{n} pieces in post',
+    piecesInPostOne: '1 piece in post',
+    metaFormat: 'Format',
+    metaDuration: 'Duration',
+    metaResolution: 'Resolution',
+    downloadKind: 'Download {label}',
+    downloadMerging: 'Merging…',
+    downloadSaving: 'Saving…',
+    downloadRetry: 'Retry',
+    downloadItem: 'Download',
+    unavailable: 'Unavailable',
+    libraryTitle: 'Your media',
+    librarySubtitle: 'Collected from this Facebook post',
+    savedTitle: 'Saved',
+    savedSubtitle: 'Downloaded from this tab',
+    foundCount: '{n} found',
+    foundCountOne: '1 found',
     filterAll: 'All',
     filterVideos: 'Videos',
     filterImages: 'Images',
-    emptyTitle: 'No signal',
-    emptyState:
-      'Play a reel or story. You\'ll see only what you\'re watching now — if something is missing, check "All".',
-    footerNote:
-      'HD videos are merged with audio automatically. Only download content you have the rights to.',
-    bannerDegraded:
-      'This browser can\'t merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.',
-    download: 'Download',
-    downloadWithAudio: 'Download with audio',
-    merging: 'Merging…',
-    retry: 'Retry',
-    unavailable: 'Unavailable',
-    saving: 'Saving…',
-    saveCover: 'Save cover image',
+    yourPicks: 'Your picks',
+    selectAll: 'Select all',
+    deselectAll: 'Clear picks',
+    selectItem: 'Select',
+    cardPhoto: 'Photo',
+    libraryEmptyTitle: 'No media yet',
+    libraryEmptyBody: 'Play or scroll a Facebook post and it lands here.',
+    savedEmptyTitle: 'Nothing saved yet',
+    savedEmptyBody: 'Downloads you make from this tab show up here.',
+    selectedCount: '{n} selected',
+    selectedCountOne: '1 selected',
+    downloadSelected: 'Download selected ({n})',
+    bulkBusy: 'Saving {i}/{n}…',
+    composeVideo: 'video',
+    composeImage: 'image',
+    composeAudio: 'audio',
     tagMayLackAudio: 'may lack audio',
     tagAudioTrack: 'audio track',
+    tagFailed: 'failed',
     titleBlobUnavailable: 'This media is an MSE blob: and can\'t be saved.',
-    titleClear: 'Empty the list',
+    bannerDegraded:
+      'This browser can\'t merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.',
     settings: 'Settings',
-    settingsLanguage: 'Language',
+    settingsAutosave: 'Changes save automatically',
     titleSettings: 'Settings',
     titleCloseSettings: 'Close settings',
     settingsDownloads: 'Downloads',
     settingsPanel: 'Panel',
     settingsCapture: 'Capture',
+    settingsSavedData: 'Saved data',
     settingsTemplate: 'Filename',
     settingsSubfolder: 'Save in "FaceScrap/" subfolder',
     settingsQuality: 'Default quality',
-    settingsDirect: 'Direct download (no audio merge)',
+    settingsDirect: 'Direct download',
+    settingsDirectHint: 'May skip audio merge',
+    settingsHdNote: 'HD video + audio merge automatically. Direct download may skip audio.',
+    settingsLanguage: 'Language',
     settingsFollowLang: 'Follow browser language',
     settingsOrder: 'List order',
-    settingsConfirmClear: 'Confirm before clearing',
     settingsVideosOnly: 'Videos only',
     settingsMinRes: 'Minimum resolution',
     settingsMaxItems: 'Max saved items',
+    settingsConfirmClear: 'Confirm before clearing',
+    settingsClearList: 'Clear captured list',
+    settingsClearHint: 'Library only · Saved stays',
+    settingsRights: 'Only download content you have the rights to.',
+    clear: 'Clear',
     qualityHighest: 'Highest',
     qualityLowest: 'Lowest',
     qualityAsk: 'Ask',
@@ -118,46 +208,84 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     kindAudio: 'Audio',
   },
   es: {
-    clear: 'Limpiar',
-    filterPlaying: '▶ Reproduciéndose',
+    brandTagline: 'recuerdos de facebook, bien guardados',
+    viewNowPlaying: 'Reproduciendo',
+    viewLibrary: 'Biblioteca',
+    viewSaved: 'Guardados',
+    nowStatus: 'Reproduciendo',
+    nowLive: 'En directo de Facebook',
+    nowEmptyTitle: 'Nada reproduciéndose',
+    nowEmptyBody: 'Reproduce un reel o historia en esta pestaña, o abre tu Biblioteca.',
+    videoQuality: 'Calidad del video',
+    qualityOptions: '{n} opciones',
+    qualityOptionsOne: '1 opción',
+    piecesInPost: '{n} piezas en la publicación',
+    piecesInPostOne: '1 pieza en la publicación',
+    metaFormat: 'Formato',
+    metaDuration: 'Duración',
+    metaResolution: 'Resolución',
+    downloadKind: 'Descargar {label}',
+    downloadMerging: 'Uniendo…',
+    downloadSaving: 'Guardando…',
+    downloadRetry: 'Reintentar',
+    downloadItem: 'Descargar',
+    unavailable: 'No disponible',
+    libraryTitle: 'Tu contenido',
+    librarySubtitle: 'Recopilado de esta publicación de Facebook',
+    savedTitle: 'Guardados',
+    savedSubtitle: 'Descargado de esta pestaña',
+    foundCount: '{n} encontrados',
+    foundCountOne: '1 encontrado',
     filterAll: 'Todo',
     filterVideos: 'Videos',
     filterImages: 'Imágenes',
-    emptyTitle: 'Sin señal',
-    emptyState:
-      'Reproduce un reel o historia. Aquí verás solo lo que estás viendo ahora — si algo no aparece, míralo en «Todo».',
-    footerNote:
-      'Los videos HD se unen con audio automáticamente. Descarga solo contenido sobre el que tengas derechos.',
-    bannerDegraded:
-      'Este navegador no puede unir audio y video: los HD se descargan solo con imagen. Usa Chrome o Edge para incluir el audio.',
-    download: 'Descargar',
-    downloadWithAudio: 'Descargar con audio',
-    merging: 'Uniendo…',
-    retry: 'Reintentar',
-    unavailable: 'No disponible',
-    saving: 'Guardando…',
-    saveCover: 'Guardar portada',
+    yourPicks: 'Tu selección',
+    selectAll: 'Seleccionar todo',
+    deselectAll: 'Quitar selección',
+    selectItem: 'Seleccionar',
+    cardPhoto: 'Foto',
+    libraryEmptyTitle: 'Sin contenido aún',
+    libraryEmptyBody: 'Reproduce o desplaza una publicación de Facebook y aparecerá aquí.',
+    savedEmptyTitle: 'Nada guardado aún',
+    savedEmptyBody: 'Las descargas que hagas desde esta pestaña aparecerán aquí.',
+    selectedCount: '{n} seleccionados',
+    selectedCountOne: '1 seleccionado',
+    downloadSelected: 'Descargar seleccionados ({n})',
+    bulkBusy: 'Guardando {i}/{n}…',
+    composeVideo: 'video',
+    composeImage: 'imagen',
+    composeAudio: 'audio',
     tagMayLackAudio: 'puede venir sin audio',
     tagAudioTrack: 'pista de audio',
+    tagFailed: 'falló',
     titleBlobUnavailable: 'Este medio es un blob: de MSE y no puede guardarse.',
-    titleClear: 'Vaciar lista',
+    bannerDegraded:
+      'Este navegador no puede unir audio y video: los HD se descargan solo con imagen. Usa Chrome o Edge para incluir el audio.',
     settings: 'Configuración',
-    settingsLanguage: 'Idioma',
+    settingsAutosave: 'Los cambios se guardan solos',
     titleSettings: 'Configuración',
     titleCloseSettings: 'Cerrar configuración',
     settingsDownloads: 'Descargas',
     settingsPanel: 'Panel',
     settingsCapture: 'Captura',
+    settingsSavedData: 'Datos guardados',
     settingsTemplate: 'Nombre de archivo',
     settingsSubfolder: 'Guardar en subcarpeta «FaceScrap/»',
     settingsQuality: 'Calidad por defecto',
-    settingsDirect: 'Descarga directa (sin unir audio)',
+    settingsDirect: 'Descarga directa',
+    settingsDirectHint: 'Puede omitir la unión de audio',
+    settingsHdNote: 'Los HD unen video + audio solos. La descarga directa puede omitir el audio.',
+    settingsLanguage: 'Idioma',
     settingsFollowLang: 'Seguir idioma del navegador',
     settingsOrder: 'Orden de la lista',
-    settingsConfirmClear: 'Confirmar antes de vaciar',
     settingsVideosOnly: 'Solo videos',
     settingsMinRes: 'Resolución mínima',
-    settingsMaxItems: 'Máx. de items',
+    settingsMaxItems: 'Máx. de items guardados',
+    settingsConfirmClear: 'Confirmar antes de vaciar',
+    settingsClearList: 'Vaciar lista capturada',
+    settingsClearHint: 'Solo Biblioteca · Guardados permanece',
+    settingsRights: 'Descarga solo contenido sobre el que tengas derechos.',
+    clear: 'Vaciar',
     qualityHighest: 'Mayor',
     qualityLowest: 'Menor',
     qualityAsk: 'Preguntar',

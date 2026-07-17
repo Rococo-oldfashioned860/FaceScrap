@@ -1,9 +1,14 @@
 // Generates real PNG icon files (16/48/128px) with zero dependencies.
 // A hand-rolled PNG encoder (RGBA) using Node's built-in zlib.
-// Draws the FaceScrap "Flow route" mark: the page (origin ring) loops out
-// through a D-bowl and lands as a saved file — blue route, green destination
-// node, pink filed square. White tile, hairline border; solid-blue mono glyph
-// at 16px. Geometry lives on a 32×32 unit grid, mirroring the Figma vector.
+//
+// Draws the FaceScrap "Scrapbook" mark: a saved Facebook memory mounted as a
+// photo card — a light card with a blue (accent) frame, a blue landscape
+// (sun + two mountains) inside, and a gold media badge with a play
+// glyph at the bottom-right corner. Geometry lives on a 32×32 unit grid, mirroring
+// the inline SVG in src/sidepanel/sidepanel.html; the two MUST stay in step.
+// Transparent outside the rounded card, so the icon reads as a rounded tile on a
+// light AND a dark browser toolbar. At 16px the two smallest details (sun, back
+// mountain) are dropped so the card, its frame and one mountain stay legible.
 
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -65,11 +70,13 @@ function encodePNG(size, pixel) {
   ]);
 }
 
-const BLUE = [22, 111, 229]; // #166FE5 — route stroke, origin ring, mono glyph
-const GREEN = [66, 183, 42]; // #42B72A — destination node (the save)
-const PINK = [252, 167, 181]; // #FCA7B5 — filed square
-const TILE = [255, 255, 255]; // #FFFFFF — light tile
-const BORDER = [206, 208, 212]; // #CED0D4 — hairline (tile border)
+// Palette — mirrors the inline SVG's baked colors and the panel's tokens.
+const CARD = [238, 243, 251]; // #EEF3FB — the photo card
+const FRAME = [77, 158, 255]; // #4D9EFF — the frame (the extension's accent blue)
+const GOLD = [244, 185, 66]; // #F4B942 — sun + media badge
+const BLUE = [77, 158, 255]; // #4D9EFF — front mountain
+const BLUE_LT = [124, 156, 255]; // #7C9CFF — back mountain
+const INK = [23, 33, 60]; // #17213C — the badge's play glyph
 
 // Signed distance to a rounded rectangle centered at (cx,cy), half-size (hx,hy),
 // corner radius r. Negative inside.
@@ -79,43 +86,42 @@ function roundedRectSDF(px, py, cx, cy, hx, hy, r) {
   return dx > 0 && dy > 0 ? Math.hypot(dx, dy) - r : Math.max(dx, dy) - r;
 }
 
-// "Flow route" mark on its 32×32 grid (Figma node `FaceScrap/Flow/Logo Mark`):
-// D-bowl = right half-ellipse centered (8.5, 16) rx 15 ry 9, 2-wide stroke;
-// stem capsule x 8.5, y∈[10.5, 21.5], 1.5 wide; origin ring at (8.5, 7) r 3.5
-// with a punched hole; green node at (23.5, 16) r 3.5; pink filed square
-// centered (8.5, 25), 6×6, r 1.5. `mono` collapses every part to one color
-// and thickens the strokes so the 16px glyph survives.
-function markColor(u, v, mono) {
-  if (roundedRectSDF(u, v, 8.5, 25, 3, 3, 1.5) <= 0) return mono || PINK;
-  if (Math.hypot(u - 23.5, v - 16) <= 3.5) return mono || GREEN;
-  const dOrigin = Math.hypot(u - 8.5, v - 7);
-  if (dOrigin <= 4.25) return dOrigin >= (mono ? 2.35 : 2.75) ? (mono || BLUE) : null; // ring; hole shows the tile
-  const stemHalf = mono ? 1.2 : 0.75;
-  if (roundedRectSDF(u, v, 8.5, 16, stemHalf, 5.5 + stemHalf, stemHalf) <= 0) return mono || BLUE;
-  if (u >= 8.5) {
-    // Half-ellipse stroke via scaled-circle distance — exact enough under 4×4 SS.
-    const d = (Math.hypot((u - 8.5) / 15, (v - 16) / 9) - 1) * 9;
-    if (Math.abs(d) <= (mono ? 1.5 : 1)) return mono || BLUE;
+// Barycentric-sign point-in-triangle test.
+function inTri(px, py, ax, ay, bx, by, cx, cy) {
+  const d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+  const d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+  const d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+  const neg = d1 < 0 || d2 < 0 || d3 < 0;
+  const pos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(neg && pos);
+}
+
+// The scrapbook mark on its 32×32 grid (matches sidepanel.html's inline SVG):
+//   card   rounded rect center (16,16) half 13, r 7, coral 2px frame;
+//   badge  rounded rect center (25.75,25.75) half 4.25, r 2.5, gold, play glyph;
+//   sun    circle (21.5,11.5) r 3.1; mountains two triangles.
+// `simple` (16px) drops the sun and back mountain. Returns [r,g,b] or null.
+function markColor(u, v, simple) {
+  // Badge sits on top of the card's bottom-right corner and just past its edge.
+  if (roundedRectSDF(u, v, 25.75, 25.75, 4.25, 4.25, 2.5) <= 0) {
+    return inTri(u, v, 24.9, 24.3, 27.6, 25.9, 24.9, 27.5) ? INK : GOLD;
   }
-  return null;
+  const card = roundedRectSDF(u, v, 16, 16, 13, 13, 7);
+  if (card > 1) return null; // transparent outside the card
+  if (card > -1) return FRAME; // the ~2px frame
+  // Interior, front-to-back: front mountain, back mountain, sun, card fill.
+  if (inTri(u, v, 19.5, 16.5, 28, 24.5, 11, 24.5)) return BLUE;
+  if (!simple && inTri(u, v, 12, 13, 20, 24.5, 4, 24.5)) return BLUE_LT;
+  if (!simple && Math.hypot(u - 21.5, v - 11.5) <= 3.1) return GOLD;
+  return CARD;
 }
 
-// One sub-sample: transparent outside the tile, hairline border at its edge,
-// multicolor glyph (solid blue at 16px) over the light tile.
+// Map a pixel to the 32-grid and sample the mark; transparent outside the card.
 function sample(px, py, size) {
-  const c = size / 2;
-  const tileDist = roundedRectSDF(px, py, c, c, c, c, size * 0.22);
-  if (tileDist > 0) return null;
-  const glyphRatio = size <= 16 ? 0.94 : 0.8;
-  const g0 = (size * (1 - glyphRatio)) / 2;
-  const u = ((px - g0) / (size * glyphRatio)) * 32;
-  const v = ((py - g0) / (size * glyphRatio)) * 32;
-  const col = markColor(u, v, size <= 16 ? BLUE : null);
-  if (col) return col;
-  return tileDist > -1 ? BORDER : TILE;
+  return markColor((px / size) * 32, (py / size) * 32, size <= 16);
 }
 
-// 4×4 supersampling: the R's curved edges need anti-aliasing.
+// 4×4 supersampling: the card corners and mountain edges need anti-aliasing.
 function pixel(x, y, size) {
   const SS = 4;
   let r = 0, g = 0, b = 0, hits = 0;
