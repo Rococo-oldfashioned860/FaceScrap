@@ -435,9 +435,17 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       // exactly what the relay just declined it. (A cold open has no refusal
       // recorded, and its stale slideAt could never anchor anything.)
       const refusedHere = emptiedUnder.get(tid) === activeSig;
+      // Post-refusal escape hatch for late starts on an UNCHANGED slide (a
+      // story paused and resumed >12s in): slideAt never re-stamps, so the
+      // resumed stream can never anchor — but being the ONLY candidate
+      // actively streaming right now is discriminating enough: sustained
+      // playback stays continuously fresh, while a burst prefetch is fresh
+      // for one 12s window at the transition and has long gone quiet.
+      const freshNow = (g: string): boolean => now - (fetchNewest.get(g) ?? 0) < FETCH_FRESH_MS;
+      const onlyFreshStreaming = freshNow(seed) && ranked.every(([g]) => g === seed || !freshNow(g));
       if (
         now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS &&
-        (!refusedHere || relayable(seed))
+        (!refusedHere || relayable(seed) || onlyFreshStreaming)
       ) {
         endorse(new Set([seed]));
       }
