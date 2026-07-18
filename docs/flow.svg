@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1250" font-family="'Segoe UI', -apple-system, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="rail" gradientUnits="userSpaceOnUse" x1="112" y1="235" x2="112" y2="875">
+      <stop offset="0" stop-color="#58a6ff"/>
+      <stop offset="1" stop-color="#c284f7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0" r="1">
+      <stop offset="0" stop-color="#58a6ff" stop-opacity="0.07"/>
+      <stop offset="0.6" stop-color="#58a6ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="1" y="1" width="1438" height="1248" rx="20" fill="#0d1117" stroke="#1f2733" stroke-width="2"/>
+  <rect x="1" y="1" width="1438" height="1248" rx="20" fill="url(#glow)"/>
+
+  <!-- header -->
+  <text x="82" y="94" font-size="15" font-weight="700" letter-spacing="4" fill="#58a6ff">FROM REEL TO FILE</text>
+  <text x="80" y="140" font-size="33" font-weight="700" fill="#e6edf3">How a capture becomes a download</text>
+
+  <!-- timeline rail -->
+  <line x1="112" y1="235" x2="112" y2="875" stroke="url(#rail)" stroke-width="2.5" stroke-opacity="0.55"/>
+
+  <!-- STEP 1 -->
+  <circle cx="112" cy="235" r="25" fill="#101722" stroke="#58a6ff" stroke-width="2.5"/>
+  <text x="112" y="243" font-size="22" font-weight="700" fill="#58a6ff" text-anchor="middle">1</text>
+  <text x="170" y="235" font-size="23" font-weight="600" fill="#e6edf3">Play it on Facebook</text>
+  <rect x="1180" y="211" width="172" height="34" rx="17" fill="#58a6ff" fill-opacity="0.12" stroke="#58a6ff" stroke-opacity="0.4"/>
+  <text x="1266" y="234" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#79b8ff" text-anchor="middle">facebook.com tab</text>
+  <text x="170" y="267" font-size="17" fill="#8b949e">A reel, story or highlight streams in the tab — FaceScrap never touches the player.</text>
+
+  <!-- STEP 2 -->
+  <circle cx="112" cy="363" r="25" fill="#101722" stroke="#6f9dff" stroke-width="2.5"/>
+  <text x="112" y="371" font-size="22" font-weight="700" fill="#6f9dff" text-anchor="middle">2</text>
+  <text x="170" y="363" font-size="23" font-weight="600" fill="#e6edf3">The MAIN-world hook reads along</text>
+  <rect x="1215" y="339" width="137" height="34" rx="17" fill="#6f9dff" fill-opacity="0.12" stroke="#6f9dff" stroke-opacity="0.4"/>
+  <text x="1284" y="362" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#8ab0ff" text-anchor="middle">page-hook.ts</text>
+  <text x="170" y="395" font-size="17" fill="#8b949e">It passively reads the GraphQL responses the page already requested — playable</text>
+  <text x="170" y="421" font-size="17" fill="#8b949e">URLs and DASH manifests. It never issues queries of its own.</text>
+
+  <!-- STEP 3 -->
+  <circle cx="112" cy="491" r="25" fill="#101722" stroke="#8894ff" stroke-width="2.5"/>
+  <text x="112" y="499" font-size="22" font-weight="700" fill="#8894ff" text-anchor="middle">3</text>
+  <text x="170" y="491" font-size="23" font-weight="600" fill="#e6edf3">The content script relays</text>
+  <rect x="1232" y="467" width="120" height="34" rx="17" fill="#8894ff" fill-opacity="0.12" stroke="#8894ff" stroke-opacity="0.4"/>
+  <text x="1292" y="490" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#9da8ff" text-anchor="middle">content.ts</text>
+  <text x="170" y="523" font-size="17" fill="#8b949e">Forwards each find over postMessage, scans the DOM as a fallback, and signals</text>
+  <text x="170" y="549" font-size="17" fill="#8b949e">which video you are actually watching.</text>
+
+  <!-- STEP 4 -->
+  <circle cx="112" cy="619" r="25" fill="#101722" stroke="#a58bff" stroke-width="2.5"/>
+  <text x="112" y="627" font-size="22" font-weight="700" fill="#a58bff" text-anchor="middle">4</text>
+  <text x="170" y="619" font-size="23" font-weight="600" fill="#e6edf3">The service worker files it</text>
+  <rect x="1172" y="595" width="180" height="34" rx="17" fill="#a58bff" fill-opacity="0.12" stroke="#a58bff" stroke-opacity="0.4"/>
+  <text x="1262" y="618" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#b8a5ff" text-anchor="middle">service-worker.ts</text>
+  <text x="170" y="651" font-size="17" fill="#8b949e">Adds the fbcdn tracks it sees on the network, sanitizes every item, and stores</text>
+  <text x="170" y="677" font-size="17" fill="#8b949e">it per tab in chrome.storage.session.</text>
+
+  <!-- STEP 5 -->
+  <circle cx="112" cy="747" r="25" fill="#101722" stroke="#c284f7" stroke-width="2.5"/>
+  <text x="112" y="755" font-size="22" font-weight="700" fill="#c284f7" text-anchor="middle">5</text>
+  <text x="170" y="747" font-size="23" font-weight="600" fill="#e6edf3">The side panel shows it live</text>
+  <rect x="1215" y="723" width="137" height="34" rx="17" fill="#c284f7" fill-opacity="0.12" stroke="#c284f7" stroke-opacity="0.4"/>
+  <text x="1284" y="746" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#d2a3ff" text-anchor="middle">sidepanel.ts</text>
+  <text x="170" y="779" font-size="17" fill="#8b949e">Now Playing, Library and Saved re-render as items arrive.</text>
+  <text x="170" y="805" font-size="17" fill="#8b949e">Pick a quality and hit Download.</text>
+
+  <!-- STEP 6 -->
+  <circle cx="112" cy="875" r="25" fill="#101722" stroke="#d2b04c" stroke-width="2.5"/>
+  <text x="112" y="883" font-size="22" font-weight="700" fill="#d2b04c" text-anchor="middle">6</text>
+  <text x="170" y="875" font-size="23" font-weight="600" fill="#e6edf3">Two roads to your disk</text>
+  <rect x="1180" y="851" width="172" height="34" rx="17" fill="#d2b04c" fill-opacity="0.12" stroke="#d2b04c" stroke-opacity="0.4"/>
+  <text x="1266" y="874" font-size="14" font-family="ui-monospace, 'Cascadia Code', Consolas, monospace" fill="#e0c56e" text-anchor="middle">chrome.downloads</text>
+
+  <!-- branch: trunk splitting into both cards -->
+  <path d="M112,900 V916 Q112,928 124,928 H1010" fill="none" stroke="#39414d" stroke-width="2"/>
+  <path d="M430,928 V956" fill="none" stroke="#3fb950" stroke-width="2" stroke-opacity="0.8"/>
+  <polygon points="423,954 437,954 430,964" fill="#3fb950" fill-opacity="0.8"/>
+  <path d="M1010,928 V956" fill="none" stroke="#d29922" stroke-width="2" stroke-opacity="0.8"/>
+  <polygon points="1003,954 1017,954 1010,964" fill="#d29922" fill-opacity="0.8"/>
+
+  <!-- card A: progressive -->
+  <rect x="150" y="962" width="560" height="132" rx="14" fill="#101722" stroke="#3fb950" stroke-opacity="0.45" stroke-width="1.5"/>
+  <text x="174" y="1004" font-size="20" font-weight="700" fill="#3fb950">Progressive MP4</text>
+  <text x="174" y="1036" font-size="16.5" fill="#8b949e">Already carries its audio — saved straight</text>
+  <text x="174" y="1062" font-size="16.5" fill="#8b949e">to your Downloads folder.</text>
+
+  <!-- card B: DASH -->
+  <rect x="730" y="962" width="560" height="132" rx="14" fill="#101722" stroke="#d29922" stroke-opacity="0.45" stroke-width="1.5"/>
+  <text x="754" y="1004" font-size="20" font-weight="700" fill="#d29922">HD · DASH (the blob: ones)</text>
+  <text x="754" y="1036" font-size="16.5" fill="#8b949e">offscreen.ts fetches the video and audio tracks, then</text>
+  <text x="754" y="1062" font-size="16.5" fill="#8b949e">ffmpeg.wasm remuxes them (stream copy, no re-encode).</text>
+
+  <!-- footer -->
+  <text x="720" y="1162" font-size="16.5" font-style="italic" fill="#6e7681" text-anchor="middle">Either way it lands as a plain .mp4 in your Downloads folder.</text>
+</svg>
