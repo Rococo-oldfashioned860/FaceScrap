@@ -68,28 +68,49 @@ let windowId: number | undefined;
 
 // Picked card ids (the tray cart). Kept outside the DOM so a pick survives the
 // frequent full re-renders — every storage change plus the 2s tick rebuilds the
-// grid, and a badge read back off the node would be lost.
+// grid, and a badge read back off the node would be lost. Cleared on tab switch:
+// the cart points at the outgoing tab's cards.
 const selected = new Set<string>();
-// A single card/Now-Playing download in flight, keyed by card id, so its spinner
-// and disabled state survive re-render.
+// The per-tab state below is keyed `${tabId}:${cardId|groupKey}` (tabKey):
+// content-derived ids collide across tabs (the same reel open twice), and
+// namespacing lets the state SURVIVE tab switches — wiping it on onActivated
+// used to repaint an in-flight download as idle, inviting a duplicate run.
+const tabKey = (tid: number | undefined, id: string): string => `${tid ?? -1}:${id}`;
+// A single card/Now-Playing download in flight, so its spinner and disabled
+// state survive re-render AND tab switches. Any entry — any tab's — holds this
+// panel's bulk tray closed; both paths drive the same offscreen document.
 const cardBusy = new Set<string>();
-// A bulk (tray) run is in flight: render() must not paint over the button's
-// progress label, and a second run must not start a parallel one. The guard is
-// global because the offscreen document it drives is; `bulkTab` is only which
-// tab's cart is being downloaded, which decides who owns the button's label.
+// A bulk (tray) run is in flight IN THIS PANEL: render() must not paint over the
+// button's progress label, and a second run must not start here. Cross-window and
+// cross-card ordering is not this flag's job — the service worker serializes every
+// DASH job on one chain (see downloadDash in service-worker.ts); panel flags only
+// gate their own UI. `bulkTab` is which tab's cart is being downloaded, which
+// decides who owns the button's label.
 let bulkRunning = false;
 let bulkTab: number | undefined;
-// Cards whose last download attempt failed, keyed by card id. There is no retry
-// button in the grid, so this only puts an honest tag on the card; the Now Playing
-// button turns into "Retry".
+// Cards whose last download attempt failed. There is no retry button in the
+// grid, so this only puts an honest tag on the card; the Now Playing button
+// turns into "Retry".
 const lastFailed = new Set<string>();
+
+/** Drop one tab's entries from the tab-namespaced state: its media was wiped
+ *  (navigation reset), its list was cleared, or the tab closed — a later
+ *  recapture of the same content-derived id must not inherit a stale failure
+ *  tag or quality pick. cardBusy is deliberately left alone: an in-flight
+ *  download owns its entry and removes it when it settles. */
+function pruneTabState(tid: number): void {
+  const prefix = `${tid}:`;
+  for (const k of [...lastFailed]) if (k.startsWith(prefix)) lastFailed.delete(k);
+  for (const k of [...qualityChoice.keys()]) if (k.startsWith(prefix)) qualityChoice.delete(k);
+}
 // Tabs closed while this panel document lived. A download or bulk queue that
 // snapshotted its tid keeps draining after the tab closes, and writing its
 // receipts would recreate the saved_ key purgeTab just removed — the serial
 // chain orders enqueued tasks, not future ones. Consulted before every addSaved.
 const deadTabs = new Set<number>();
-// Chosen quality per video (videoGroupKey → item id), so a re-render (every
-// storage change + the 2s tick) doesn't reset the Now Playing selector to the best.
+// Chosen quality per video (tabKey(tab, videoGroupKey) → item id), so a re-render
+// (every storage change + the 2s tick) doesn't reset the Now Playing selector to
+// the best — and a pick made in one tab never leaks into another.
 const qualityChoice = new Map<string, string>();
 // False only on a Chromium browser without the offscreen API: DASH remux is then
 // impossible, so those options degrade to a direct video-only download. Defaults
@@ -326,6 +347,13 @@ function stripAudio(): boolean {
  *  either way — a bulk run must survive one bad item — and reports whether it
  *  landed. Failure/saved bookkeeping is the caller's: it is keyed by CARD, and an
  *  item does not know which card is downloading it. */
+// UI hang backstop only — it fires if the SW dies without closing the message
+// port. Correctness timeouts live in the SW (115s per job, measured from job
+// START; jobs run one at a time on its chain), so this outer bound is sized for
+// a realistic queue — a second card clicked in this panel plus another window's
+// job — never for a single merge.
+const DASH_UI_TIMEOUT_MS = 360_000;
+
 async function startDashDownload(item: MediaItem): Promise<boolean> {
   const audioUrl = item.audioUrl;
   if (audioUrl == null) return false; // callers gate on audioUrl; narrow it for the typed message
@@ -338,7 +366,7 @@ async function startDashDownload(item: MediaItem): Promise<boolean> {
         filename: filenameFor(item),
         saveAs: askOnSave(),
       } satisfies DownloadDashMsg),
-      120000,
+      DASH_UI_TIMEOUT_MS,
       'The merge timed out.',
     );
     if (!r?.ok) throw new Error(r?.error || 'Merge failed.');
@@ -382,29 +410,30 @@ function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
  *  start while a bulk run is going, and the tray refuses to start while a single
  *  is going. Busy + failed state are keyed by card id and survive re-render. */
 async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
-  if (bulkRunning || cardBusy.has(cardId)) return;
-  // Snapshot the tab AND the receipt: the merge can await up to 120s, and
+  // Snapshot the tab AND the receipt: the merge can await minutes, and
   // onActivated flips module `tabId` on a tab switch — the save belongs to the
   // tab and the card that were clicked.
   const tid = tabId;
+  const bkey = tabKey(tid, cardId);
+  if (bulkRunning || cardBusy.has(bkey)) return;
   const receipt = savedEntryFor(cardId, item);
-  cardBusy.add(cardId);
-  lastFailed.delete(cardId);
+  cardBusy.add(bkey);
+  lastFailed.delete(bkey);
   lastRenderSig = ''; // busy state feeds the card + the Now Playing button
   await render();
   const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
   if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, [receipt]);
-  // Panel-local bookkeeping belongs to the tab that started the download. If the
-  // panel followed a tab switch during the (up to 120s) merge, onActivated has
-  // already cleared cardBusy/lastFailed for the incoming tab — this run must not
-  // re-seed them, or a failure would tag the wrong tab's card (fbcdn ids are
-  // content-derived, so the same reel open in both tabs shares an id). Same guard
-  // runBulk uses.
+  // Busy/failed are tab-namespaced, so this bookkeeping can never tag another
+  // tab's card — it runs unconditionally (the old clear-on-switch model instead
+  // dropped it, leaving a phantom busy entry). Only the repaint is scoped: a
+  // panel showing another tab repaints just the globally-gated tray.
+  cardBusy.delete(bkey);
+  if (!ok) lastFailed.add(bkey);
   if (tid === tabId) {
-    cardBusy.delete(cardId);
-    if (!ok) lastFailed.add(cardId);
     lastRenderSig = '';
     await render();
+  } else {
+    paintTray();
   }
 }
 
@@ -575,7 +604,7 @@ function cardMeta(card: Card): HTMLElement {
   // silently. The pick stays put; the card's own Download button re-tries.
   // Never on a stub: a receipt IS a success, and a failure recorded under the
   // same content-derived id belongs to the live card, not the history row.
-  if (!card.stale && lastFailed.has(card.id)) appendTag(meta, t('tagFailed'), 'tag-fail');
+  if (!card.stale && lastFailed.has(tabKey(tabId, card.id))) appendTag(meta, t('tagFailed'), 'tag-fail');
   return meta;
 }
 
@@ -642,7 +671,7 @@ function renderCard(card: Card): HTMLElement {
   const dl = document.createElement('button');
   dl.className = 'card-dl';
   dl.type = 'button';
-  const busy = cardBusy.has(card.id);
+  const busy = cardBusy.has(tabKey(tabId, card.id));
   if (card.target != null) {
     dl.title = t('downloadItem');
     dl.setAttribute('aria-label', t('downloadItem'));
@@ -734,8 +763,9 @@ function paintNow(now: NowState | null): void {
   byId('now-content').hidden = now == null;
   if (now == null) return;
 
-  // Chosen representation: the user's pick for this video (persisted), else the setting.
-  let target = now.options.find((o) => o.id === qualityChoice.get(now.gkey)) ?? defaultTarget(now.options)!;
+  // Chosen representation: the user's pick for this video in this tab, else the setting.
+  let target =
+    now.options.find((o) => o.id === qualityChoice.get(tabKey(tabId, now.gkey))) ?? defaultTarget(now.options)!;
 
   const preview = byId('now-preview');
   preview.classList.toggle('is-video', now.kind === 'video');
@@ -761,13 +791,13 @@ function paintNow(now: NowState | null): void {
   const dl = byId<HTMLButtonElement>('now-download');
   const paintMeta = (): void => {
     byId('m-resolution').textContent = target.kind === 'video' ? resolutionOf(target).label : '—';
-    const busy = cardBusy.has(now.id);
+    const busy = cardBusy.has(tabKey(tabId, now.id));
     dl.disabled = busy || bulkRunning;
     dl.textContent = busy
       ? target.audioUrl != null
         ? t('downloadMerging')
         : t('downloadSaving')
-      : lastFailed.has(now.id)
+      : lastFailed.has(tabKey(tabId, now.id))
         ? t('downloadRetry')
         : downloadLabel(target);
   };
@@ -790,7 +820,7 @@ function paintNow(now: NowState | null): void {
     select.disabled = now.options.length <= 1;
     select.onchange = (): void => {
       target = now.options.find((o) => o.id === select.value) ?? now.options[0];
-      qualityChoice.set(now.gkey, target.id);
+      qualityChoice.set(tabKey(tabId, now.gkey), target.id);
       paintMeta();
     };
   }
@@ -899,17 +929,17 @@ async function runBulk(): Promise<void> {
   } finally {
     bulkRunning = false;
     bulkTab = undefined;
-    // The panel followed a tab switch while the queue ran: onActivated already
-    // cleared this tab's state and this run's ids must not re-seed it — fbcdn ids
-    // are content-derived, so the same reel open in both tabs would collide.
+    // Failure tags are tab-namespaced, so this bookkeeping is safe even if the
+    // panel followed a tab switch mid-queue (the switch already emptied
+    // `selected`, so the unpick loop is a no-op there). Unpick only what landed:
+    // a failure keeps its pick, so pressing Download again retries exactly the
+    // items that didn't make it.
+    for (const id of done) {
+      selected.delete(id);
+      lastFailed.delete(tabKey(tid, id));
+    }
+    for (const id of failed) lastFailed.add(tabKey(tid, id));
     if (tid === tabId) {
-      // Unpick only what landed: a failure keeps its pick, so pressing Download
-      // again retries exactly the items that didn't make it.
-      for (const id of done) {
-        selected.delete(id);
-        lastFailed.delete(id);
-      }
-      for (const id of failed) lastFailed.add(id);
       lastRenderSig = ''; // the saved list and the failure tags feed the cards
       await render();
     }
@@ -1056,7 +1086,7 @@ async function doRender(): Promise<void> {
       ? 'none'
       : `${now.id}|${now.thumbUrl ?? ''}|${now.durationSec ?? ''}|${now.pieces}|${now.kind}|${now.options
           .map((o) => o.id)
-          .join('~')}|${cardBusy.has(now.id) ? 1 : 0}|${lastFailed.has(now.id) ? 1 : 0}`;
+          .join('~')}|${cardBusy.has(tabKey(tid, now.id)) ? 1 : 0}|${lastFailed.has(tabKey(tid, now.id)) ? 1 : 0}`;
   const sig = [
     view,
     mediaFilter,
@@ -1079,8 +1109,8 @@ async function doRender(): Promise<void> {
             (c) =>
               `${c.id}|${c.thumbUrl ?? ''}|${c.resLabel ?? ''}|${c.durationSec ?? ''}|${
                 c.target != null ? 1 : 0
-              }|${c.mayLackAudio ? 1 : 0}|${c.live ? 1 : 0}|${lastFailed.has(c.id) ? 1 : 0}|${
-                cardBusy.has(c.id) ? 1 : 0
+              }|${c.mayLackAudio ? 1 : 0}|${c.live ? 1 : 0}|${lastFailed.has(tabKey(tid, c.id)) ? 1 : 0}|${
+                cardBusy.has(tabKey(tid, c.id)) ? 1 : 0
               }|${c.stale ? 1 : 0}`, // stale bit: a stub→live revival must repaint
           )
           .join('\n'),
@@ -1193,11 +1223,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   byId('clear').addEventListener('click', async () => {
     if (settings.confirmClear && !window.confirm(t('confirmClearPrompt'))) return;
-    // The picks and the failure tags point at items about to stop existing; drop
-    // them here rather than leaving render() to prune a cart whose contents went away.
+    // The picks, failure tags and quality choices point at items about to stop
+    // existing; drop them here rather than leaving render() to prune a cart
+    // whose contents went away. Only this tab's — Clear is a per-tab action.
     selected.clear();
-    lastFailed.clear();
     if (tabId !== undefined) {
+      pruneTabState(tabId);
       // Route through the worker so the wipe serializes on the same write chain as
       // capture writes (a panel-side clearTab can't, and the list would resurrect).
       // The worker also resets the badge once the removal lands.
@@ -1221,6 +1252,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const playingCh = changes[`playing_${tid}`];
     if ((mediaCh && mediaCh.newValue === undefined) || (playingCh && playingCh.newValue === undefined)) {
       purgeTabBindings(tid);
+      // The wiped items' failure tags and quality picks must go too: a recapture
+      // of the same content-derived id after this navigation is a NEW item, and
+      // rendering it with a phantom "failed" tag or a stale pick lies.
+      pruneTabState(tid);
     }
     if (
       `media_${tid}` in changes ||
@@ -1233,10 +1268,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Forget the last-live video of tabs that close (panel-local memory), and
-  // remember the tab is dead so a draining download can't resurrect its saved_.
+  // Forget a closed tab's panel-local memory: last-live video, failure tags and
+  // quality picks (cardBusy entries are owned by their in-flight download, which
+  // deletes them on settle). deadTabs stops a draining download from
+  // resurrecting the tab's just-purged saved_ key.
   chrome.tabs.onRemoved.addListener((id) => {
     forgetLastLive(id);
+    pruneTabState(id);
     deadTabs.add(id);
   });
 
@@ -1265,15 +1303,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (windowId !== undefined && info.windowId !== windowId) return;
     flushBindingsNow(); // persist the OUTGOING tab's learning before switching
     tabId = info.tabId;
-    // Picks, failures, per-card busy and quality choices belong to the tab that
-    // made them: the incoming tab's items are different items, and an id that
-    // happens to collide would arrive pre-picked. lastRenderSig goes too — two
-    // empty tabs share a signature, and a skipped render would leave the outgoing
-    // tab's grid on screen.
+    // Only the cart empties: it points at the outgoing tab's cards. Busy, failure
+    // and quality state STAY — they are tab-namespaced (tabKey), so the incoming
+    // tab renders its own entries and an in-flight download keeps its spinner for
+    // when the user switches back (clearing it here used to repaint a running
+    // merge as idle and invite a duplicate). lastRenderSig goes: two empty tabs
+    // share a signature, and a skipped render would leave the outgoing tab's
+    // grid on screen.
     selected.clear();
-    lastFailed.clear();
-    cardBusy.clear();
-    qualityChoice.clear();
     lastRenderSig = '';
     await loadBindings(info.tabId); // restore the incoming tab's bindings before its first render
     void render();

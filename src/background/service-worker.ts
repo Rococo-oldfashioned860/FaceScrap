@@ -328,18 +328,29 @@ const SETTLE_CAP_MS = 5 * 60_000;
 // Grace before closing the idle offscreen document after a download settles —
 // long enough that back-to-back quality downloads reuse the loaded ffmpeg.
 const OFFSCREEN_IDLE_MS = 60_000;
-// Backstop on the mux round-trip. The offscreen already bounds each track fetch
-// (FETCH_TIMEOUT_MS=90s ×2 concurrent + a short exec ≈ 95s worst case), but if the
-// offscreen dies outright — a lost message, a wedged ffmpeg exec — the SW would
-// await forever and stay pinned by the keepalive. Cap it under the panel's own
-// 120s UI timeout so the worker unwinds around when the panel gives up. On expiry
-// runDownloadDash throws, downloadDash's .finally clears inflightDownloads, and a
-// retry is no longer a no-op against a dead in-flight promise.
+// Backstop on ONE mux round-trip, measured from job START — jobs are serialized
+// on dashChain below, so queue wait never burns this budget. The offscreen
+// already bounds each track fetch (FETCH_TIMEOUT_MS=90s ×2 concurrent + a short
+// exec ≈ 95s worst case), but if the offscreen dies outright — a lost message, a
+// wedged ffmpeg exec — the SW would await forever and stay pinned by the
+// keepalive. On expiry runDownloadDash throws, downloadDash's .finally clears
+// inflightDownloads, and a retry is no longer a no-op against a dead in-flight
+// promise. The panel's own timeout is a much larger hang backstop (360s), sized
+// for a queue of jobs, so a queued job no longer times out over work that was
+// going to land.
 const MUX_TIMEOUT_MS = 115_000;
 
 function pairKey(videoUrl: string, audioUrl: string): string {
   return `${videoUrl}\n${audioUrl}`;
 }
+
+// Every DASH job runs one at a time on this chain, whichever panel window sent
+// it. The offscreen muxQueue already serializes the MUXES, but a job's
+// MUX_TIMEOUT used to start at sendMessage — so a request queued behind a long
+// merge burned its budget waiting and was reported failed over work that then
+// completed and was thrown away. Chaining here starts each job's clock at job
+// start. The trailing catch() keeps one failed job from poisoning the chain.
+let dashChain: Promise<void> = Promise.resolve();
 
 function downloadDash(videoUrl: string, audioUrl: string, filename: string, saveAs: boolean): Promise<void> {
   const key = pairKey(videoUrl, audioUrl);
@@ -351,7 +362,8 @@ function downloadDash(videoUrl: string, audioUrl: string, filename: string, save
     return Promise.resolve(); // already saved moments ago → idempotent no-op
   }
 
-  const job = runDownloadDash(videoUrl, audioUrl, filename, saveAs)
+  const job = dashChain
+    .then(() => runDownloadDash(videoUrl, audioUrl, filename, saveAs))
     .then(() => {
       recentlyDownloaded.set(key, Date.now());
       for (const [k, t] of recentlyDownloaded) {
@@ -361,6 +373,7 @@ function downloadDash(videoUrl: string, audioUrl: string, filename: string, save
     .finally(() => {
       inflightDownloads.delete(key);
     });
+  dashChain = job.catch(() => {});
   inflightDownloads.set(key, job);
   return job;
 }
