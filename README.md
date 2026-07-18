@@ -1,5 +1,8 @@
 # FaceScrap
 
+[![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Save the Facebook **reels, stories and highlights** you can watch, with one click.
 Chrome extension (Manifest V3, TypeScript) for **personal use** (load unpacked).
 
@@ -7,6 +10,10 @@ Chrome extension (Manifest V3, TypeScript) for **personal use** (load unpacked).
 > Meta's Terms prohibit automated downloading, so this is **not publishable** on
 > the Chrome Web Store, and it depends on Facebook internals that change often
 > (expect roughly monthly maintenance).
+
+<p align="center">
+  <img src="docs/sidepanel.png" width="420" alt="FaceScrap side panel — Now Playing, Library and Saved views">
+</p>
 
 ## How it works
 
@@ -117,7 +124,7 @@ rules/referer-rules.json           # DNR: sets the Referer on fbcdn requests
 > **Size:** the `ffmpeg.wasm` core (~31 MB) is copied into `dist/assets/ffmpeg/`,
 > so the unpacked extension weighs ~31 MB. Normal for personal use.
 
-## TODO
+## Roadmap
 
 - More precise source detection (reel/story/highlight) from each GraphQL
   response's `fb_api_req_friendly_name`.
