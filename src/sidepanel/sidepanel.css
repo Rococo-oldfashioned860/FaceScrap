@@ -436,6 +436,9 @@ body::before {
 }
 
 .quality { flex: none; display: flex; flex-direction: column; gap: 8px; }
+/* The author display beats the UA [hidden] rule, so hiding needs its own rule —
+   paintNow toggles this block off for image/audio Now Playing. */
+.quality[hidden] { display: none; }
 .quality-head { display: flex; align-items: center; justify-content: space-between; }
 .quality-label { font: 600 12px/16px var(--font-body); letter-spacing: 0.2px; color: var(--text-primary); }
 .quality-count { font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }

@@ -467,9 +467,14 @@ interface Card {
   /** This card is what the tab is playing right now. */
   live: boolean;
   /** Hidden from the LIBRARY grid by a declutter setting (videosOnly,
-   *  minResolution) or the cover dedupe. A flag, not a drop: the Saved history
-   *  and the cart must keep seeing the card. */
+   *  minResolution). A flag, not a drop: the Saved history and the cart must
+   *  keep seeing the card. */
   libraryHidden?: boolean;
+  /** This image is the cover of a Library-visible video: a dupe under "All"
+   *  (the video card already wears it), but the real, downloadable item under
+   *  the explicit "Images" sub-filter — hiding it there would make a captured
+   *  cover unreachable in every view. */
+  coverOfShown?: boolean;
   /** A Saved receipt with no live capture behind it (media_ was wiped). Renders
    *  with honest disabled controls; revives when a replay re-captures the same
    *  content-derived id. */
@@ -722,6 +727,12 @@ function buildNowState(items: MediaItem[], tid: number | undefined, playing: Set
   if (playingVideo) {
     const key = videoGroupKey(playingVideo);
     const group = items.filter((i) => i.kind === 'video' && videoGroupKey(i) === key);
+    // The declutter settings apply here exactly as in the Library grid — the
+    // two views must agree on what the minimum-resolution filter hides.
+    if (settings.minResolution > 0) {
+      const maxH = Math.max(0, ...group.map((i) => i.height ?? 0));
+      if (maxH > 0 && maxH < settings.minResolution) return null;
+    }
     const { options, gkey, thumbUrl, durationSec } = videoOptions(group, tid);
     if (options.length === 0) return null;
     return {
@@ -735,6 +746,8 @@ function buildNowState(items: MediaItem[], tid: number | undefined, playing: Set
       gkey,
     };
   }
+  // "Videos only" hides images/audio from every view, this one included.
+  if (settings.videosOnly) return null;
   const img = playingItems.find((i) => i.kind === 'image' && isDownloadable(i));
   if (!img) return null;
   return {
@@ -957,6 +970,15 @@ async function runBulk(): Promise<void> {
 let renderRunning = false;
 let renderQueued = false;
 let lastRenderSig = '';
+// Hold signature-changing DOM rebuilds while a <select> is focused: a rebuild
+// tears the quality dropdown's options out from under its open popup, and
+// capture bursts churn the signature exactly while the user is picking. The
+// hold retries shortly and gives up after 10s so a chatty tab can't pin a
+// stale panel forever.
+let renderBlockedSince = 0;
+let renderRetryTimer: number | undefined;
+const RENDER_HOLD_MAX_MS = 10_000;
+const RENDER_HOLD_RETRY_MS = 500;
 
 async function render(): Promise<void> {
   if (renderRunning) {
@@ -1034,16 +1056,16 @@ async function doRender(): Promise<void> {
     cards.push(card);
   }
   // An image card that is only the cover of a Library-VISIBLE video is a dupe
-  // there — but only there: its receipt still renders in Saved, and a cover
-  // whose video is itself hidden keeps its Library slot exactly as before.
+  // under "All" — but only there: it stays reachable under the "Images"
+  // sub-filter (its own flag below), its receipt still renders in Saved, and a
+  // cover whose video is itself hidden keeps its Library slot exactly as before.
   const shownCovers = new Set(
     cards.filter((c) => !c.libraryHidden).map((c) => c.thumbId).filter((x): x is string => x != null),
   );
   for (const it of others) {
     const card = buildItemCard(it, playing);
-    if ((it.kind === 'image' && shownCovers.has(it.id)) || (settings.videosOnly && it.kind !== 'video')) {
-      card.libraryHidden = true;
-    }
+    if (it.kind === 'image' && shownCovers.has(it.id)) card.coverOfShown = true;
+    if (settings.videosOnly && it.kind !== 'video') card.libraryHidden = true;
     cards.push(card);
   }
   cards.sort((a, b) => (settings.listOrder === 'oldest' ? a.at - b.at : b.at - a.at));
@@ -1073,7 +1095,7 @@ async function doRender(): Promise<void> {
   const base =
     view === 'saved'
       ? orderedSaved.map((e) => cardsById.get(e.id) ?? stubCard(e))
-      : cards.filter((c) => !c.libraryHidden);
+      : cards.filter((c) => !c.libraryHidden && !(c.coverOfShown && mediaFilter !== 'image'));
   const gridCards =
     view === 'now' ? [] : base.filter((c) => mediaFilter === 'all' || c.kind === mediaFilter);
 
@@ -1121,8 +1143,23 @@ async function doRender(): Promise<void> {
     // is storage-driven, not a click — a pick the active filter hides can be
     // dropped without moving the signature, leaving the tray offering a gone item.
     if (pruned) paintTray();
+    renderBlockedSince = 0;
     return;
   }
+  if (document.activeElement instanceof HTMLSelectElement) {
+    const nowMs = Date.now();
+    if (renderBlockedSince === 0) renderBlockedSince = nowMs;
+    if (nowMs - renderBlockedSince < RENDER_HOLD_MAX_MS) {
+      if (renderRetryTimer === undefined) {
+        renderRetryTimer = window.setTimeout(() => {
+          renderRetryTimer = undefined;
+          void render();
+        }, RENDER_HOLD_RETRY_MS);
+      }
+      return; // deferred — lastRenderSig stays put, so the retry re-detects the change
+    }
+  }
+  renderBlockedSince = 0;
   lastRenderSig = sig;
 
   byId('view-now').hidden = view !== 'now';
