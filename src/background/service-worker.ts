@@ -9,7 +9,7 @@
 // persist immediately. Never keep capture state in module-scope variables.
 
 import { withTimeout } from '../shared/async';
-import { addMedia, clearTab, purgeTab, setCaps, setPlaying, setRecent } from '../shared/storage';
+import { addMedia, boundPlayingMark, clearTab, purgeTab, setCaps, setPlaying, setRecent } from '../shared/storage';
 import { classifyNetworkRequest, isFbcdn, sanitizeIncomingItems, widenDashUrl, type MediaSource } from '../shared/media';
 import { DASH_UI_TIMEOUT_MS, type MuxMsg, type MuxResponse, type RevokeMsg, type RuntimeMessage } from '../shared/messages';
 import { hasOffscreen, hasSidePanel } from '../shared/capabilities';
@@ -170,8 +170,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             .filter((c): c is string => typeof c === 'string' && c.length <= 8192 && isFbcdn(c))
             .slice(0, 3)
         : undefined,
-      // Opaque slide marker — compared only, never fetched; just bound its size.
-      mark: typeof m.mark === 'string' && m.mark.length > 0 ? m.mark.slice(0, 256) : undefined,
+      // Opaque slide marker — compared only, never fetched; bound its size
+      // keeping head AND tail so an overlong mark can't collapse two loads.
+      mark: typeof m.mark === 'string' && m.mark.length > 0 ? boundPlayingMark(m.mark) : undefined,
       at: Date.now(),
     });
     return undefined;

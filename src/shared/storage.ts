@@ -109,12 +109,29 @@ export interface PlayingRef {
    *  the cover↔video binding so returning to an already-buffered video (which
    *  fetches nothing) still matches instantly. */
   coverUrls?: string[];
-  /** Opaque slide marker: a combined story-card URL id + per-video-load id (see
-   *  content.ts videoMark/storyCardMark). Never fetched; only COMPARED, so the
-   *  panel can tell "the video under the centre changed" on surfaces that expose
-   *  no cover/poster ids at all. */
+  /** Opaque slide marker: a durable DOM story id (`u:`) or provisional pinned-
+   *  path fallback (`p:`), combined with a per-video-load id when present (see
+   *  content.ts). Never fetched; only compared/bound according to provenance. */
   mark?: string;
   at: number;
+}
+
+/** Bound an opaque PlayingRef.mark for persistence. An overlong mark is cut
+ *  at the story side only: the `#<videoMark>` suffix (already capped at ~200
+ *  by video-mark.ts) survives whole so consecutive loads stay distinct, and
+ *  the story head becomes a stable prefix so the derived story portion still
+ *  re-matches the same card across loads — a plain prefix slice would collapse
+ *  loads, a positional head+tail split would shift the portion whenever the
+ *  suffix length changes. */
+export function boundPlayingMark(mark: string): string {
+  if (mark.length <= 256) return mark;
+  const i = mark.lastIndexOf('#');
+  if (i < 0) return mark.slice(0, 256);
+  // Fixed budgets, not remainder math: a head that flexed with suffix length
+  // would change the derived story portion between loads `:9` and `:10`. 56
+  // covers a whole synthetic `#vm:<uuid>:<seq>` suffix; an overlong progressive
+  // src keeps its last 56 chars instead — still deterministic per load.
+  return mark.slice(0, Math.min(i, 200)) + mark.slice(i).slice(-56);
 }
 
 const playingKey = (tabId: number): string => `playing_${tabId}`;
