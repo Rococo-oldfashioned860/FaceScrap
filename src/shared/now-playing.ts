@@ -8,6 +8,7 @@
 
 import { fbAssetKeys, mediaId, trackKey, videoGroupKey, type MediaItem } from './media';
 import { getBind, getPlaying, getRecent, setBind } from './storage';
+import { isDurableStoryMark, isProvisionalStoryMark } from './story-mark';
 
 // An MSE-played video (blob: currentSrc, never in ref.ids) only matches via fetched
 // tracks, which age out of the match window after streaming stops — so remember the
@@ -71,12 +72,11 @@ function remember(map: Map<string, string>, key: string, value: string): void {
   if (map.size > BIND_MAX) map.delete(map.keys().next().value as string);
 }
 
-// The re-attach-durable slice of a combined mark: the `u:<owner>/<card>` portion
-// before `#`. Survives a story video's srcObject re-attach (which regenerates the
-// `vm:` suffix) AND panel reopen, so a markBind keyed on it re-matches a buffered
-// MSE story revisit with zero network. undefined off /stories (no `u:` prefix).
+// The re-attach-durable slice of a combined mark: the DOM-proven
+// `u:<owner>/<card>` portion before `#`. A `p:` path fallback is provisional —
+// the path is tray-wide — so it deliberately has no durable portion.
 function markStoryPortion(mark: string | undefined): string | undefined {
-  if (mark == null || !mark.startsWith('u:')) return undefined;
+  if (!isDurableStoryMark(mark)) return undefined;
   const i = mark.indexOf('#');
   return i >= 0 ? mark.slice(0, i) : mark;
 }
@@ -143,7 +143,13 @@ export async function loadBindings(tid: number): Promise<void> {
   const prefix = `${tid}:`;
   for (const [k, v] of state.coverBind) remember(coverBind, prefix + k, v);
   for (const [k, v] of state.groupCover) remember(groupCover, prefix + k, v);
-  for (const [k, v] of state.markBind) remember(markBind, prefix + k, v);
+  // Provenance invariant (markBind never holds `p:` keys), restore layer: the
+  // write gate in endorse() already refuses provisional marks, so a clean
+  // write path can't persist one — this filter only guards corrupt or
+  // hand-written storage, and the read guard in selectPlaying backstops both.
+  for (const [k, v] of state.markBind) {
+    if (!isProvisionalStoryMark(k)) remember(markBind, prefix + k, v);
+  }
 }
 // A nav/close reset (clearTab) fired for this tab: drop its in-memory learned
 // bindings + last-live and cancel any pending flush, so a debounced write can't
@@ -284,19 +290,21 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // the previous VIDEO card played — honouring it would pin that stale video onto
   // the photo. Gate on hasVideo: a slide with no video can't be a buffered video
   // revisit, so it must never resurrect a video group.
+  // The provisional check is the read layer of the markBind provenance
+  // invariant (endorse()'s write gate and loadBindings' restore filter are the
+  // other two): markBind can't contain `p:` keys, so this only defends against
+  // one of those layers being relaxed in isolation.
   const fullMark = ref?.mark;
-  if (ref?.hasVideo === true && fullMark != null) {
+  if (ref?.hasVideo === true && fullMark != null && !isProvisionalStoryMark(fullMark)) {
     const mg = markBind.get(`${tid}:${fullMark}`);
     if (mg != null) domLive.add(mg);
   }
-  // The re-attach-durable story-card portion (no `vm:`) lets an already-buffered
-  // MSE story video re-match after reopen once its `vm:` id regenerated — BUT on
-  // story surfaces the URL path does NOT advance per card, so this portion is the
-  // SAME for every card in the tray; applied blindly it would pin now-playing to
-  // the first-learned video. Honour it only when no OTHER group is streaming fresh
-  // since this slide began: a genuine buffered revisit has no competing stream,
-  // whereas advancing to a new card streams a DIFFERENT group — there, skip the
-  // rescue so `domLive` stays empty and the relay/slide-change logic can hand over.
+  // The re-attach-durable DOM-card portion (no `vm:`) lets an already-buffered
+  // MSE story video re-match after reopen once its `vm:` id regenerated. Honour
+  // it only when no OTHER group is streaming fresh since this slide began: a
+  // genuine buffered revisit has no competing stream, whereas a transition can
+  // expose stale binding evidence alongside a different fresh group — there,
+  // skip the rescue so the relay/slide-change logic can hand over.
   // Gate on hasVideo for the same reason as the full-mark rescue above: on a photo
   // card tracks is forced empty (hasVideo=false ⇒ no fetch evidence), so
   // otherStreamingFresh is unconditionally false and this would re-pin the
@@ -396,8 +404,10 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // wide match window the global oldest is dragged back by the group's own
     // pre-slide prefetch, which would silently block learning for exactly the
     // stories that need the revisit rescue most. Learn under BOTH the full mark
-    // and the story-card portion.
-    if (ref.mark != null && anchored) {
+    // and the story-card portion. The provisional check is the WRITE gate of
+    // the markBind provenance invariant — loadBindings' restore filter and the
+    // full-mark rescue's read guard mirror it as defense in depth.
+    if (ref.mark != null && anchored && !isProvisionalStoryMark(ref.mark)) {
       remember(markBind, `${tid}:${ref.mark}`, g);
       const sp = markStoryPortion(ref.mark);
       if (sp != null) remember(markBind, `${tid}:${sp}`, g);

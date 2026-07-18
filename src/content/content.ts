@@ -6,6 +6,8 @@
 
 import { isFbcdn, isStaticFbAsset, makeItem, mediaId, sanitizeIncomingItems, type MediaItem } from '../shared/media';
 import type { RuntimeMessage } from '../shared/messages';
+import { isStoryPath, storyCardMark as formatStoryCardMark } from '../shared/story-mark';
+import { createVideoMarkFactory } from '../shared/video-mark';
 
 // After the extension is reloaded/updated, this content script keeps running in
 // the already-open page but its chrome.* context is dead — calls then throw
@@ -194,16 +196,17 @@ function storyCardDomId(anchor: Element): string | undefined {
   return closestAttrValue(anchor, 'data-id', (id) => id.startsWith('Uz') && id.length > 12);
 }
 
-// Durable per-story-card marker: `u:<owner>/<card>`. Survives panel reopen and page
-// reload; immune to fbcdn prefetch; empty off /stories. Prefer the DOM card id over
-// the URL's <card> segment — the URL segment stays constant across the whole tray
-// (verified live: it does not advance even across BUCKETS in the home-feed
-// viewer) — falling back to the URL only when no DOM anchor is available.
+// Story-card marker: a DOM-proven id is durable (`u:<owner>/<card>`), while the
+// URL fallback is provisional (`p:<owner>/<card>`). The URL stays pinned to the
+// card that opened the tray even across BUCKETS, so its value may distinguish a
+// video load but must never become a durable cover/video binding.
 function storyCardMark(anchor?: Element): string {
-  const m = location.pathname.match(/\/stories\/([^/]+)\/([^/]+)/);
-  if (!m) return '';
+  // Pathname gate BEFORE the ancestor walk: detectPlaying runs this several
+  // times a second on every facebook.com surface, and off /stories the walk's
+  // result is discarded unconditionally.
+  if (!isStoryPath(location.pathname)) return '';
   const domId = anchor ? storyCardDomId(anchor) : undefined;
-  return `u:${m[1]}/${domId ?? m[2]}`;
+  return formatStoryCardMark(location.pathname, domId);
 }
 
 // The played reel's real numeric video id: the reels feed tags each reel's container
@@ -219,18 +222,13 @@ function reelVideoId(video: HTMLVideoElement): string | undefined {
 // per-load srcObject handle (a fresh object per slide, element as fallback) and mint
 // one synthetic id per handle — stable while a slide plays, new on the next slide.
 // Progressive videos still expose a real src → use it directly.
-const videoMarks = new WeakMap<object, string>();
-let markSeq = 0;
+// A fresh epoch per content-script lifetime prevents a story viewer/page reload
+// from recycling `vm:1` while the side panel still remembers the prior slide.
+const markVideoLoad = createVideoMarkFactory(crypto.randomUUID());
 function videoMark(v: HTMLVideoElement): string {
   const src = v.currentSrc || v.src;
-  if (src && !src.startsWith('blob:')) return src.slice(0, 200);
   const key: object = (v.srcObject as object | null) ?? v;
-  let m = videoMarks.get(key);
-  if (m === undefined) {
-    m = `vm:${++markSeq}`;
-    videoMarks.set(key, m);
-  }
-  return m;
+  return markVideoLoad(key, src);
 }
 
 function centreMedia(): {
@@ -367,11 +365,11 @@ function urlVideoId(): string | undefined {
 function detectPlaying(): void {
   if (disposed) return;
   const { ids, hasVideo, covers, mark: videoMk, videoEl, centreEl } = centreMedia();
-  // Combine the durable story-card signal with the per-video-load marker so the mark
-  // changes if either does. Format: `u:<owner>/<card>#<videoMark>` on stories, bare
-  // `<videoMark>` on reels/feed (storyCardMark is empty there). The card anchor
-  // prefers the playing video, else the topmost centre element — a photo card
-  // or a dead bucket still advances the mark that way.
+  // Combine the story-card signal with the per-video-load marker so the mark
+  // changes if either does. Story prefixes are durable `u:` for DOM-proven cards
+  // or provisional `p:` for the pinned-path fallback; reels/feed use the bare
+  // video marker. The card anchor prefers the playing video, else the topmost
+  // centre element — a photo card or dead bucket can still advance the mark.
   const mark = [storyCardMark(videoEl ?? centreEl), videoMk].filter(Boolean).join('#');
   // Debounce transient empties during slide transitions to avoid flicker.
   if (ids.length === 0 && !hasVideo) {
