@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FaceScrap",
-  "version": "0.2.0",
+  "version": "1.0",
   "minimum_chrome_version": "116",
   "description": "Save the Facebook reels, stories and highlights you can watch, with one click.",
   "action": {

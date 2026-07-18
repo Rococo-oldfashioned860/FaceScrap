@@ -1,6 +1,6 @@
 {
   "name": "facescrap",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "FaceScrap — download Facebook reels, stories and highlights (Chrome MV3, TypeScript).",
   "author": "Hydza",
   "private": true,

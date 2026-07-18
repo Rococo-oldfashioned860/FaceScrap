@@ -37,7 +37,7 @@ body:
     attributes:
       label: FaceScrap version
       description: The commit or release tag you built/downloaded (shown in the extension's Settings).
-      placeholder: v0.2.0
+      placeholder: v1.0
     validations:
       required: true
   - type: dropdown
