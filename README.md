@@ -12,8 +12,10 @@ Chrome extension (Manifest V3, TypeScript) for **personal use** (load unpacked).
 > (expect roughly monthly maintenance).
 
 <p align="center">
-  <img src="docs/sidepanel.png" width="420" alt="FaceScrap side panel — Now Playing, Library and Saved views">
+  <img src="docs/library.png" width="330" alt="FaceScrap Library view with captured videos and photos">
+  <img src="docs/sidepanel.png" width="330" alt="FaceScrap Now Playing view (empty state)">
 </p>
+<p align="center"><i>Library with sample captures · Now Playing before media is detected</i></p>
 
 ## How it works
 
