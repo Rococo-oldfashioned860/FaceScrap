@@ -16,7 +16,7 @@ import {
   type MediaKind,
   type MediaSource,
 } from '../shared/media';
-import { getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n';
+import { fmt, getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n';
 import { withTimeout } from '../shared/async';
 import { addSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../shared/settings';
@@ -119,7 +119,7 @@ let offscreenAvailable = true;
 
 /** A count string: `{n}` is substituted, and one is a different string entirely. */
 function tn(one: MsgKey, many: MsgKey, n: number): string {
-  return t(n === 1 ? one : many).replace('{n}', String(n));
+  return fmt(n === 1 ? one : many, { n });
 }
 
 /** "video + image" — only the kinds actually present, in a fixed order so the line
@@ -198,8 +198,7 @@ function setupLangToggle(): void {
     setLang(lang);
     void saveLang(lang);
     localize();
-    lastRenderSig = '';
-    void render();
+    void render(); // the language is a signature term; render() sees the change
   });
 }
 
@@ -228,7 +227,8 @@ async function applySetting(patch: Partial<Settings>): Promise<void> {
     localize();
   }
   reflectSettings();
-  lastRenderSig = ''; // settings feed the render; force the skipped-if-unchanged rebuild
+  // No signature reset: every render-relevant setting is already a signature
+  // term, so render() rebuilds exactly when something visible changed.
   await render();
 }
 
@@ -419,10 +419,9 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   const receipt = savedEntryFor(cardId, item);
   cardBusy.add(bkey);
   lastFailed.delete(bkey);
-  lastRenderSig = ''; // busy state feeds the card + the Now Playing button
-  await render();
+  await render(); // busy/failed are signature terms; render() sees them flip
   const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
-  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, [receipt]);
+  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
   // Busy/failed are tab-namespaced, so this bookkeeping can never tag another
   // tab's card — it runs unconditionally (the old clear-on-switch model instead
   // dropped it, leaving a phantom busy entry). Only the repaint is scoped: a
@@ -430,7 +429,6 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   cardBusy.delete(bkey);
   if (!ok) lastFailed.add(bkey);
   if (tid === tabId) {
-    lastRenderSig = '';
     await render();
   } else {
     paintTray();
@@ -714,19 +712,25 @@ interface NowState {
 
 /** The playing item, focused. Prefers a playing video group (with its full quality
  *  ladder); falls back to a playing image. Null when nothing downloadable plays. */
-function buildNowState(items: MediaItem[], tid: number | undefined, playing: Set<string>, pieces: number): NowState | null {
+function buildNowState(
+  items: MediaItem[],
+  groups: Map<string, MediaItem[]>,
+  tid: number | undefined,
+  playing: Set<string>,
+  pieces: number,
+): NowState | null {
   const playingItems = items.filter((i) => playing.has(i.id));
   if (playingItems.length === 0) return null;
 
   // The playing set often carries only the streamed baseline track, not the video's
-  // full quality ladder. Take the playing video's GROUP key, then rebuild the whole
-  // group from every captured item that shares it — so Now Playing gets the same
-  // duration, resolution and quality options the grid card gets (the DASH reps that
-  // carry them aren't necessarily in the playing set).
+  // full quality ladder. Take the playing video's GROUP key and look up the whole
+  // group doRender already built — so Now Playing gets the same duration,
+  // resolution and quality options the grid card gets (the DASH reps that carry
+  // them aren't necessarily in the playing set).
   const playingVideo = playingItems.find((i) => i.kind === 'video');
   if (playingVideo) {
     const key = videoGroupKey(playingVideo);
-    const group = items.filter((i) => i.kind === 'video' && videoGroupKey(i) === key);
+    const group = groups.get(key) ?? [playingVideo];
     // The declutter settings apply here exactly as in the Library grid — the
     // two views must agree on what the minimum-resolution filter hides.
     if (settings.minResolution > 0) {
@@ -766,7 +770,7 @@ function downloadLabel(target: MediaItem): string {
   const ext = extFor(target.kind).toUpperCase();
   const res = resolutionOf(target).label;
   const label = target.kind === 'video' && res !== 'Video' ? `${ext} · ${res}` : ext;
-  return t('downloadKind').replace('{label}', label);
+  return fmt('downloadKind', { label });
 }
 
 /** Paint the Now Playing view from a NowState. Wires the quality selector (which
@@ -878,23 +882,22 @@ function paintTray(): void {
   // A run in flight, or a single card downloading, owns the offscreen document; the
   // tray must not start a second. Enablement is global; only the label is tab-scoped
   // — a run painting "Saving 2/3…" in its own tab must not be stamped over here.
-  if (bulkRunning || cardBusy.size > 0) {
-    btn.disabled = true;
-    if (!bulkRunning || bulkTab !== tabId) btn.textContent = t('downloadSelected').replace('{n}', String(n));
-    syncSelectAll();
-    return;
-  }
-  btn.disabled = false;
-  btn.textContent = t('downloadSelected').replace('{n}', String(n));
+  btn.disabled = bulkRunning || cardBusy.size > 0;
+  if (!bulkRunning || bulkTab !== tabId) btn.textContent = fmt('downloadSelected', { n });
   syncSelectAll();
+}
+
+/** Downloadable visible cards and whether every one is already picked — shared
+ *  by the Select-all label and its click handler so the two can't drift. */
+function pickableState(): { targets: Card[]; allPicked: boolean } {
+  const targets = visibleCards.filter((c) => c.target != null);
+  return { targets, allPicked: targets.length > 0 && targets.every((c) => selected.has(c.id)) };
 }
 
 /** Keep the "Select all" / "Clear picks" link in step with whether every
  *  downloadable visible card is already picked. */
 function syncSelectAll(): void {
-  const targets = visibleCards.filter((c) => c.target != null);
-  const allPicked = targets.length > 0 && targets.every((c) => selected.has(c.id));
-  byId('select-all').textContent = allPicked ? t('deselectAll') : t('selectAll');
+  byId('select-all').textContent = pickableState().allPicked ? t('deselectAll') : t('selectAll');
 }
 
 /** Download every pick, one at a time. Sequential on purpose: parallel DASH merges
@@ -928,16 +931,14 @@ async function runBulk(): Promise<void> {
       // cart, and #bulk-dl is one shared node — this label would report our queue
       // over their picks.
       if (bulkTab === tabId && view !== 'now') {
-        btn.textContent = t('bulkBusy')
-          .replace('{i}', String(i + 1))
-          .replace('{n}', String(queue.length));
+        btn.textContent = fmt('bulkBusy', { i: i + 1, n: queue.length });
       }
       const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
       (ok ? done : failed).push(id);
       // Persist each save as it lands, not as one batch at the end: the download
       // belongs to the SW and the browser, so a panel closed mid-queue leaves the
       // files on disk — a `done` bank still in memory would die with the document.
-      if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, [receipt]);
+      if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
     }
   } finally {
     bulkRunning = false;
@@ -1085,7 +1086,7 @@ async function doRender(): Promise<void> {
   // Pieces = the cards of the post on screen right now (the live ones), not the
   // whole tab's capture count. Now Playing state is only built for its own view.
   const now =
-    view === 'now' ? buildNowState(items, tid, playing, cards.filter((c) => c.live).length) : null;
+    view === 'now' ? buildNowState(items, groups, tid, playing, cards.filter((c) => c.live).length) : null;
   // Library hides the declutter-flagged cards. Saved renders the receipt ledger
   // in download order: the live card when the capture still exists (a real
   // re-download with fresh URLs), a stub frozen from the receipt when it does
@@ -1209,8 +1210,7 @@ function setupViews(): void {
     if (btn == null || !nav.contains(btn)) return;
     view = (btn.dataset.view as View | undefined) ?? 'now';
     pressOnly(nav, btn);
-    lastRenderSig = '';
-    void render();
+    void render(); // the view is a signature term
   });
 }
 
@@ -1221,20 +1221,18 @@ function setupFilters(): void {
     if (btn == null || !nav.contains(btn)) return;
     mediaFilter = (btn.dataset.filter as MediaFilter | undefined) ?? 'all';
     pressOnly(nav, btn);
-    lastRenderSig = '';
-    void render();
+    void render(); // the sub-filter is a signature term
   });
 }
 
 function setupSelectAll(): void {
   byId('select-all').addEventListener('click', () => {
-    const targets = visibleCards.filter((c) => c.target != null);
-    const allPicked = targets.length > 0 && targets.every((c) => selected.has(c.id));
+    const { targets, allPicked } = pickableState();
     for (const c of targets) {
       if (allPicked) selected.delete(c.id);
       else selected.add(c.id);
     }
-    lastRenderSig = ''; // rebuild so every card's pick state repaints
+    lastRenderSig = ''; // picks paint in place and are not a signature term — force the rebuild
     void render();
   });
 }
@@ -1322,14 +1320,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     if ((next === 'en' || next === 'es') && next !== getLang()) {
       setLang(next);
       localize();
-      lastRenderSig = '';
-      void render();
+      void render(); // language is a signature term
     }
     if ('settings' in changes) {
       void (async () => {
         settings = await loadSettings();
         reflectSettings();
-        lastRenderSig = '';
+        // No signature reset: the render-relevant settings are signature terms,
+        // so the echo of this panel's own applySetting() write stays a cheap
+        // no-op instead of a full rebuild.
         await render();
       })();
     }
@@ -1353,9 +1352,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     void render();
   });
 
-  // Safety net: keep Now Playing fresh even if a storage event is missed. An
-  // unchanged signature still skips the rebuild, so a quiet tab costs one selectPlaying.
-  window.setInterval(() => void render(), 2000);
+  // Safety net for the live view only: now-playing inference carries time-based
+  // state (grace windows, takeover timers) that must re-evaluate even when no
+  // storage event fires. The grids are storage-driven — ticking them too would
+  // re-read the tab's keys every 2s for nothing.
+  window.setInterval(() => {
+    if (view === 'now') void render();
+  }, 2000);
 
   // Best-effort: persist learning captured within the 1s debounce window when the
   // panel is torn down.

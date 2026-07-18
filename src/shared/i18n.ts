@@ -9,6 +9,9 @@ export type MsgKey =
   | 'viewNowPlaying'
   | 'viewLibrary'
   | 'viewSaved'
+  // Nav landmarks (aria-label only).
+  | 'ariaViews'
+  | 'ariaFilters'
   // Now Playing.
   | 'nowStatus'
   | 'nowLive'
@@ -118,6 +121,8 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     viewNowPlaying: 'Now Playing',
     viewLibrary: 'Library',
     viewSaved: 'Saved',
+    ariaViews: 'Views',
+    ariaFilters: 'Media filters',
     nowStatus: 'Now playing',
     nowLive: 'Live from Facebook',
     nowEmptyTitle: 'Nothing playing',
@@ -216,6 +221,8 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     viewNowPlaying: 'Reproduciendo',
     viewLibrary: 'Biblioteca',
     viewSaved: 'Guardados',
+    ariaViews: 'Vistas',
+    ariaFilters: 'Filtros de contenido',
     nowStatus: 'Reproduciendo',
     nowLive: 'En directo de Facebook',
     nowEmptyTitle: 'Nada reproduciéndose',
@@ -323,4 +330,13 @@ export function getLang(): Lang {
 
 export function t(key: MsgKey): string {
   return MESSAGES[currentLang][key];
+}
+
+/** Fill a message's `{placeholder}` slots: fmt('bulkBusy', { i: 1, n: 3 }).
+ *  Each placeholder appears at most once per message, so plain replace() is
+ *  enough — this exists so call sites stop hand-chaining replacements. */
+export function fmt(key: MsgKey, vars: Record<string, string | number>): string {
+  let s = t(key);
+  for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, String(v));
+  return s;
 }

@@ -3,15 +3,17 @@
 //
 // Draws the FaceScrap "Scrapbook" mark: a saved Facebook memory mounted as a
 // photo card — a light card with a blue (accent) frame, a blue landscape
-// (sun + two mountains) inside, and a gold media badge with a play
-// glyph at the bottom-right corner. Geometry lives on a 32×32 unit grid, mirroring
-// the inline SVG in src/sidepanel/sidepanel.html; the two MUST stay in step.
+// (sun + two mountains) inside, and a gold media badge with a play glyph at the
+// bottom-right corner. The geometry and palette are PARSED out of the inline
+// SVG in src/sidepanel/sidepanel.html at build time — the HTML is the single
+// source of truth, so reshaping the logo there reshapes these PNGs, and any
+// unparseable drift fails the build instead of silently forking the mark.
 // Transparent outside the rounded card, so the icon reads as a rounded tile on a
 // light AND a dark browser toolbar. At 16px the two smallest details (sun, back
 // mountain) are dropped so the card, its frame and one mountain stay legible.
 
 import { deflateSync } from 'node:zlib';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,13 +72,51 @@ function encodePNG(size, pixel) {
   ]);
 }
 
-// Palette — mirrors the inline SVG's baked colors and the panel's tokens.
-const CARD = [238, 243, 251]; // #EEF3FB — the photo card
-const FRAME = [77, 158, 255]; // #4D9EFF — the frame (the extension's accent blue)
-const GOLD = [244, 185, 66]; // #F4B942 — sun + media badge
-const BLUE = [77, 158, 255]; // #4D9EFF — front mountain
-const BLUE_LT = [124, 156, 255]; // #7C9CFF — back mountain
-const INK = [23, 33, 60]; // #17213C — the badge's play glyph
+// ── Parse the mark out of sidepanel.html's inline SVG (32×32 viewBox) ────────
+const svg = (() => {
+  const html = readFileSync(join(ROOT, 'src', 'sidepanel', 'sidepanel.html'), 'utf8');
+  const m = html.match(/<svg[^>]*viewBox="0 0 32 32"[\s\S]*?<\/svg>/);
+  if (!m) throw new Error('generate-icons: logo <svg viewBox="0 0 32 32"> not found in sidepanel.html');
+  return m[0];
+})();
+
+function fail(what) {
+  throw new Error(`generate-icons: could not parse the logo SVG's ${what} — keep the icon script in step`);
+}
+
+function hexToRgb(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex) ?? fail(`color "${hex}"`);
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+// The card: the SVG's only stroked rect. Center/half-size/radius for the SDF.
+const cardTag =
+  svg.match(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="([\d.]+)" fill="(#\w{6})" stroke="(#\w{6})" stroke-width="([\d.]+)"/) ??
+  fail('stroked card rect');
+const [cardX, cardY, cardW, cardH, cardR] = cardTag.slice(1, 6).map(Number);
+const CARD_RECT = { cx: cardX + cardW / 2, cy: cardY + cardH / 2, hx: cardW / 2, hy: cardH / 2, r: cardR };
+const CARD = hexToRgb(cardTag[6]);
+const FRAME = hexToRgb(cardTag[7]);
+const FRAME_HALF = Number(cardTag[8]) / 2;
+
+// The badge: the filled, unstroked rect (the clipPath rect has no fill).
+const badgeTag =
+  svg.match(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="([\d.]+)" fill="(#\w{6})" \/>/) ??
+  fail('badge rect');
+const [bX, bY, bW, bH, bR] = badgeTag.slice(1, 6).map(Number);
+const BADGE_RECT = { cx: bX + bW / 2, cy: bY + bH / 2, hx: bW / 2, hy: bH / 2, r: bR };
+const GOLD = hexToRgb(badgeTag[6]);
+
+// The sun.
+const sunTag = svg.match(/<circle cx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)" fill="(#\w{6})"/) ?? fail('sun circle');
+const SUN = { cx: Number(sunTag[1]), cy: Number(sunTag[2]), r: Number(sunTag[3]), rgb: hexToRgb(sunTag[4]) };
+
+// Triangles, in document (paint) order: back mountain, front mountain, play glyph.
+const TRI_RE = /<path d="M([\d.]+) ([\d.]+) L([\d.]+) ([\d.]+) L([\d.]+) ([\d.]+) Z" fill="(#\w{6})"/g;
+const tris = [...svg.matchAll(TRI_RE)].map((m) => ({ pts: m.slice(1, 7).map(Number), rgb: hexToRgb(m[7]) }));
+if (tris.length !== 3) fail(`three triangle paths (found ${tris.length})`);
+const [BACK_MTN, FRONT_MTN, GLYPH] = tris;
 
 // Signed distance to a rounded rectangle centered at (cx,cy), half-size (hx,hy),
 // corner radius r. Negative inside.
@@ -96,23 +136,20 @@ function inTri(px, py, ax, ay, bx, by, cx, cy) {
   return !(neg && pos);
 }
 
-// The scrapbook mark on its 32×32 grid (matches sidepanel.html's inline SVG):
-//   card   rounded rect center (16,16) half 13, r 7, coral 2px frame;
-//   badge  rounded rect center (25.75,25.75) half 4.25, r 2.5, gold, play glyph;
-//   sun    circle (21.5,11.5) r 3.1; mountains two triangles.
+// The scrapbook mark on its 32×32 grid, drawn from the parsed SVG shapes.
 // `simple` (16px) drops the sun and back mountain. Returns [r,g,b] or null.
 function markColor(u, v, simple) {
   // Badge sits on top of the card's bottom-right corner and just past its edge.
-  if (roundedRectSDF(u, v, 25.75, 25.75, 4.25, 4.25, 2.5) <= 0) {
-    return inTri(u, v, 24.9, 24.3, 27.6, 25.9, 24.9, 27.5) ? INK : GOLD;
+  if (roundedRectSDF(u, v, BADGE_RECT.cx, BADGE_RECT.cy, BADGE_RECT.hx, BADGE_RECT.hy, BADGE_RECT.r) <= 0) {
+    return inTri(u, v, ...GLYPH.pts) ? GLYPH.rgb : GOLD;
   }
-  const card = roundedRectSDF(u, v, 16, 16, 13, 13, 7);
-  if (card > 1) return null; // transparent outside the card
-  if (card > -1) return FRAME; // the ~2px frame
+  const card = roundedRectSDF(u, v, CARD_RECT.cx, CARD_RECT.cy, CARD_RECT.hx, CARD_RECT.hy, CARD_RECT.r);
+  if (card > FRAME_HALF) return null; // transparent outside the card
+  if (card > -FRAME_HALF) return FRAME; // the stroked frame band
   // Interior, front-to-back: front mountain, back mountain, sun, card fill.
-  if (inTri(u, v, 19.5, 16.5, 28, 24.5, 11, 24.5)) return BLUE;
-  if (!simple && inTri(u, v, 12, 13, 20, 24.5, 4, 24.5)) return BLUE_LT;
-  if (!simple && Math.hypot(u - 21.5, v - 11.5) <= 3.1) return GOLD;
+  if (inTri(u, v, ...FRONT_MTN.pts)) return FRONT_MTN.rgb;
+  if (!simple && inTri(u, v, ...BACK_MTN.pts)) return BACK_MTN.rgb;
+  if (!simple && Math.hypot(u - SUN.cx, v - SUN.cy) <= SUN.r) return SUN.rgb;
   return CARD;
 }
 

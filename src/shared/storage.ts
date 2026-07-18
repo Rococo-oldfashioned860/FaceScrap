@@ -284,25 +284,19 @@ function shedThumbs(key: string, entries: SavedEntry[]): void {
   }
 }
 
-/** Record download receipts. Idempotent: re-saving an id keeps its first
- *  position and original savedAt, refreshing only the display fields (a
- *  re-download carries a newer-signed thumb that will live longer). */
-export function addSaved(tabId: number, entries: SavedEntry[]): Promise<void> {
+/** Record one download receipt (each save persists as it lands — see runBulk).
+ *  Idempotent: re-saving an id keeps its first position and original savedAt,
+ *  refreshing only the display fields (a re-download carries a newer-signed
+ *  thumb that will live longer). */
+export function addSaved(tabId: number, entry: SavedEntry): Promise<void> {
   return enqueueSaved(
     async () => {
       const key = savedKey(tabId);
       const cur = await readSaved(key);
-      const byId = new Map(cur.map((e) => [e.id, e]));
-      for (const raw of entries) {
-        const e = sanitizeEntry(raw);
-        const kept = byId.get(e.id);
-        if (kept) {
-          Object.assign(kept, e, { savedAt: kept.savedAt });
-        } else {
-          byId.set(e.id, e);
-          cur.push(e);
-        }
-      }
+      const e = sanitizeEntry(entry);
+      const kept = cur.find((x) => x.id === e.id);
+      if (kept) Object.assign(kept, e, { savedAt: kept.savedAt });
+      else cur.push(e);
       if (cur.length > SAVED_MAX) cur.splice(0, cur.length - SAVED_MAX);
       shedThumbs(key, cur);
       try {

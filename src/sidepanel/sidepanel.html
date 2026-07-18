@@ -39,7 +39,7 @@
       </header>
 
       <!-- aria-pressed carries the selected state; the CSS selects on it. -->
-      <nav id="views" class="views" aria-label="Views">
+      <nav id="views" class="views" data-i18n-aria="ariaViews" aria-label="Views">
         <button class="view-pill" type="button" data-view="now" aria-pressed="true" data-i18n="viewNowPlaying">Now Playing</button>
         <button class="view-pill" type="button" data-view="library" aria-pressed="false" data-i18n="viewLibrary">Library</button>
         <button class="view-pill" type="button" data-view="saved" aria-pressed="false" data-i18n="viewSaved">Saved</button>
@@ -114,7 +114,7 @@
           <span id="grid-count" class="grid-count"></span>
         </div>
 
-        <nav id="filters" class="filters" aria-label="Media filters">
+        <nav id="filters" class="filters" data-i18n-aria="ariaFilters" aria-label="Media filters">
           <button class="chip" type="button" data-filter="all" aria-pressed="true" data-i18n="filterAll">All</button>
           <button class="chip" type="button" data-filter="video" aria-pressed="false" data-i18n="filterVideos">Videos</button>
           <button class="chip" type="button" data-filter="image" aria-pressed="false" data-i18n="filterImages">Images</button>
