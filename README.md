@@ -111,19 +111,42 @@ Then load it in Chrome:
 
 ## Structure
 
+```mermaid
+flowchart TB
+    subgraph tab["facebook.com tab"]
+        direction TB
+        FB["Facebook page"]
+        HOOK["page-hook.ts · MAIN world<br/>patches fetch/XHR, reads GraphQL + DASH"]
+        CONTENT["content.ts · isolated world<br/>DOM scan fallback + now-playing signals"]
+    end
+
+    subgraph ext["extension"]
+        direction TB
+        SW["service-worker.ts<br/>fbcdn network capture · badge · orchestration"]
+        STORE[("chrome.storage.session<br/>per tab: captures · now-playing · saved")]
+        PANEL["sidepanel.ts<br/>Now Playing · Library · Saved"]
+        OFF["offscreen.ts<br/>ffmpeg.wasm remux, -c copy"]
+    end
+
+    DISK["Downloads folder"]
+
+    FB -->|"GraphQL responses"| HOOK
+    HOOK -->|"postMessage"| CONTENT
+    CONTENT -->|"MEDIA_FOUND · NOW_PLAYING"| SW
+    FB -.->|"fbcdn track requests"| SW
+    SW -->|"sanitized"| STORE
+    STORE -->|"live re-render"| PANEL
+    PANEL -->|"progressive MP4"| DISK
+    PANEL -->|"HD · FACESCRAP_DOWNLOAD_DASH"| SW
+    SW -->|"FACESCRAP_MUX"| OFF
+    OFF -->|"blob: MP4 with audio"| SW
+    SW -->|"remuxed MP4"| DISK
 ```
-src/
-├── background/service-worker.ts   # network capture + badge + remux orchestration
-├── content/
-│   ├── content.ts                 # DOM scan + hook injection + relay
-│   └── page-hook.ts               # MAIN world: patches fetch/XHR, reads GraphQL + DASH
-├── offscreen/
-│   ├── offscreen.html
-│   └── offscreen.ts               # ffmpeg.wasm: fetches tracks and remuxes (-c copy)
-├── sidepanel/                     # download UI (side panel, follows the active tab)
-└── shared/                        # media model, DASH, storage, settings, messages, now-playing, i18n, capabilities
-rules/referer-rules.json           # DNR: sets the Referer on fbcdn requests
-```
+
+Every context above is backed by `src/shared/` — the media model and sanitizers,
+DASH parsing, storage accessors, now-playing inference, settings, i18n and the
+typed message contracts. `rules/referer-rules.json` is a declarativeNetRequest
+rule that sets the Referer on fbcdn requests.
 
 > **Size:** the `ffmpeg.wasm` core (~31 MB) is copied into `dist/assets/ffmpeg/`,
 > so the unpacked extension weighs ~31 MB. Normal for personal use.
