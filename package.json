@@ -2,16 +2,19 @@
   "name": "facescrap",
   "version": "0.1.0",
   "description": "FaceScrap — download Facebook reels, stories and highlights (Chrome MV3, TypeScript).",
+  "author": "Hydza",
   "private": true,
   "type": "module",
   "scripts": {
     "icons": "node scripts/generate-icons.mjs",
     "build": "npm run icons && node scripts/build.mjs",
     "dev": "npm run icons && node scripts/build.mjs --watch",
-    "typecheck": "tsc --noEmit"
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc --noEmit && tsc -p tests --noEmit"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
+    "@types/node": "^26.1.1",
     "esbuild": "^0.28.1",
     "typescript": "^5.6.0"
   },
