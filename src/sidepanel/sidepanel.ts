@@ -897,6 +897,12 @@ function paintNow(now: NowState | null): void {
 const cardsById = new Map<string, Card>();
 // The grid cards currently on screen, for the Select all toggle.
 let visibleCards: Card[] = [];
+// Whether the last render saw any live card. The live bit decays by CLOCK
+// (selectPlaying's freshness/grace windows), not by storage event — playback
+// stopping on a quiet tab writes nothing — so while any card glows, the 2s
+// tick must keep re-evaluating even in the grid views or the ring never
+// turns off. Updated every doRender, before any early return.
+let anyLiveCards = false;
 
 /** Paint the tray, which reads `selected`. Deliberately NOT part of the render
  *  signature — toggling a pick repaints these nodes instead of tearing the grid
@@ -1015,11 +1021,13 @@ async function runBulk(): Promise<void> {
 let renderRunning = false;
 let renderQueued = false;
 let lastRenderSig = '';
-// Hold signature-changing DOM rebuilds while a <select> is focused: a rebuild
-// tears the quality dropdown's options out from under its open popup, and
-// capture bursts churn the signature exactly while the user is picking. The
-// hold retries shortly and gives up after 10s so a chatty tab can't pin a
-// stale panel forever.
+// Hold signature-changing DOM rebuilds while the QUALITY dropdown is focused:
+// paintNow rebuilds its options, tearing them out from under the open popup,
+// and capture bursts churn the signature exactly while the user is picking.
+// Only #now-qselect — it is the one select render() rebuilds. The settings
+// sheet's selects keep focus after a change, and holding for them deferred the
+// very repaint their applySetting() just requested. The hold retries shortly
+// and gives up after 10s so a chatty tab can't pin a stale panel forever.
 let renderBlockedSince = 0;
 let renderRetryTimer: number | undefined;
 const RENDER_HOLD_MAX_MS = 10_000;
@@ -1114,6 +1122,7 @@ async function doRender(): Promise<void> {
     cards.push(card);
   }
   cards.sort((a, b) => (settings.listOrder === 'oldest' ? a.at - b.at : b.at - a.at));
+  anyLiveCards = cards.some((c) => c.live);
 
   cardsById.clear();
   for (const c of cards) cardsById.set(c.id, c);
@@ -1151,7 +1160,7 @@ async function doRender(): Promise<void> {
   const nowSig =
     now == null
       ? 'none'
-      : `${now.id}|${now.thumbUrl ?? ''}|${now.durationSec ?? ''}|${now.pieces}|${now.kind}|${now.options
+      : `${now.id}|${now.source}|${now.thumbUrl ?? ''}|${now.durationSec ?? ''}|${now.pieces}|${now.kind}|${now.options
           .map((o) => o.id)
           .join('~')}|${cardBusy.has(tabKey(tid, now.id)) ? 1 : 0}|${lastFailed.has(tabKey(tid, now.id)) ? 1 : 0}`;
   const sig = [
@@ -1159,7 +1168,12 @@ async function doRender(): Promise<void> {
     mediaFilter,
     getLang(),
     String(offscreenAvailable),
-    String(bulkRunning),
+    // The whole busy predicate, not just bulkRunning: EVERY download button's
+    // enablement gates on it, so a single download settling while its own card
+    // is filtered out of the view must still move the signature — otherwise the
+    // visible buttons (and the tray doRender repaints) stay stuck in the busy
+    // era on a quiet tab.
+    String(offscreenBusyHere()),
     JSON.stringify([
       settings.listOrder,
       settings.videosOnly,
@@ -1174,7 +1188,10 @@ async function doRender(): Promise<void> {
       : gridCards
           .map(
             (c) =>
-              `${c.id}|${c.thumbUrl ?? ''}|${c.resLabel ?? ''}|${c.durationSec ?? ''}|${
+              // source paints the card title, so it must move the signature: a
+              // group's first item (its source authority) can change under a
+              // stable card id when the retention cap evicts it.
+              `${c.id}|${c.source}|${c.thumbUrl ?? ''}|${c.resLabel ?? ''}|${c.durationSec ?? ''}|${
                 c.target != null ? 1 : 0
               }|${c.mayLackAudio ? 1 : 0}|${c.live ? 1 : 0}|${lastFailed.has(tabKey(tid, c.id)) ? 1 : 0}|${
                 cardBusy.has(tabKey(tid, c.id)) ? 1 : 0
@@ -1191,7 +1208,7 @@ async function doRender(): Promise<void> {
     renderBlockedSince = 0;
     return;
   }
-  if (document.activeElement instanceof HTMLSelectElement) {
+  if (document.activeElement instanceof HTMLSelectElement && document.activeElement.id === 'now-qselect') {
     const nowMs = Date.now();
     if (renderBlockedSince === 0) renderBlockedSince = nowMs;
     if (nowMs - renderBlockedSince < RENDER_HOLD_MAX_MS) {
@@ -1402,12 +1419,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     void render();
   });
 
-  // Safety net for the live view only: now-playing inference carries time-based
-  // state (grace windows, takeover timers) that must re-evaluate even when no
-  // storage event fires. The grids are storage-driven — ticking them too would
-  // re-read the tab's keys every 2s for nothing.
+  // Safety net for time-decayed state: now-playing inference carries clock-based
+  // windows (freshness gates, grace, takeover timers) that must re-evaluate even
+  // when no storage event fires — playback stopping on a quiet tab writes
+  // nothing. That state feeds Now Playing AND the grid cards' live ring, so the
+  // tick runs for the live view and for any grid currently showing a live card
+  // (until the ring expires and turns itself off). Otherwise the grids are
+  // storage-driven — ticking them too would re-read the tab's keys every 2s
+  // for nothing.
   window.setInterval(() => {
-    if (view === 'now') void render();
+    if (view === 'now' || anyLiveCards) void render();
   }, 2000);
 
   // Best-effort: persist learning captured within the 1s debounce window when the
