@@ -98,9 +98,22 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
     .catch(() => {});
 });
 
+// Tabs closed this session. A capture event (webRequest or a content-script
+// message) already in flight when a tab closes can otherwise be handled AFTER
+// purgeTab's removal and resurrect media_/playing_/recent_<tabId> as an orphan
+// key that nothing will ever clean up again (Chrome doesn't reuse tab ids in a
+// session). Skipping known-dead tabs at every write entry point closes that.
+const deadTabs = new Set<number>();
+const DEAD_TABS_MAX = 4096;
+function markTabDead(tabId: number): void {
+  deadTabs.add(tabId);
+  if (deadTabs.size > DEAD_TABS_MAX) deadTabs.delete(deadTabs.values().next().value as number);
+}
+
 // 1. Observe fbcdn media streams (reels/stories video + DASH tracks).
 let lastRecentKey = '';
 function bumpRecent(tabId: number, url: string): void {
+  if (deadTabs.has(tabId)) return;
   const widened = widenDashUrl(url);
   const k = `${tabId}:${widened}`;
   if (k === lastRecentKey) return; // same track being segmented → skip
@@ -118,7 +131,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (/[?&](bytestart|byteend)=/.test(url) || /\.mp4(\?|$)/i.test(url)) {
       bumpRecent(details.tabId, url);
     }
-    if (details.type === 'media') {
+    if (details.type === 'media' && !deadTabs.has(details.tabId)) {
       const item = classifyNetworkRequest(url, Date.now(), tabSurface.get(details.tabId) ?? 'video');
       if (item) void addMedia(details.tabId, [item]).then((n) => setBadge(details.tabId, n));
     }
@@ -150,7 +163,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // believed blindly.
   const m = msg as RuntimeMessage | undefined;
 
-  if (m?.type === 'MEDIA_FOUND' && typeof tabId === 'number' && Array.isArray(m.items)) {
+  if (m?.type === 'MEDIA_FOUND' && typeof tabId === 'number' && !deadTabs.has(tabId) && Array.isArray(m.items)) {
     // The content script sanitizes too, but it shares the renderer process with
     // the page — a compromised renderer can send anything. Re-sanitize here so
     // stored items are shaped/bounded regardless of what the sender ran.
@@ -158,7 +171,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return undefined;
   }
 
-  if (m?.type === 'NOW_PLAYING' && typeof tabId === 'number') {
+  if (m?.type === 'NOW_PLAYING' && typeof tabId === 'number' && !deadTabs.has(tabId)) {
     void setPlaying(tabId, {
       ids: Array.isArray(m.ids) ? m.ids.slice(0, 24).map((x) => String(x).slice(0, 256)) : [],
       hasVideo: Boolean(m.hasVideo),
@@ -257,6 +270,7 @@ async function setBadge(tabId: number, n: number): Promise<void> {
 // 5. Clean up when a tab closes — the one path that also drops the download
 //    history (navigation and the Clear button keep it; see purgeTab).
 chrome.tabs.onRemoved.addListener((tabId) => {
+  markTabDead(tabId); // before purgeTab: late in-flight events must not re-write
   tabSurface.delete(tabId);
   void purgeTab(tabId);
 });

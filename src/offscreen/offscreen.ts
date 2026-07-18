@@ -52,25 +52,55 @@ function ensureLoaded(): Promise<FFmpegInstance> {
 // fetch() has no read timeout: a socket that connects then stalls mid-body (edge
 // hiccup, network/VPN switch, silent middlebox) leaves the read pending forever,
 // which — because mux jobs are serialized on muxQueue — would wedge EVERY later
-// DASH download. Bound the whole fetch+body read; the signal aborts the response
-// stream too, so a stalled arrayBuffer() also unblocks. Generous enough for a
-// large HD track on a slow link.
-const FETCH_TIMEOUT_MS = 90_000;
+// DASH download. A whole-transfer wall-clock cap can't tell a stall from a large
+// track on a slow-but-steady link, so it aborted legitimate slow downloads too.
+// Instead, bound the IDLE gap: reset the timer on every chunk, abort only when no
+// bytes arrive for STALL_MS. A steady stream downloads for as long as it needs.
+const STALL_MS = 60_000;
 
 async function fetchTrack(url: string): Promise<Uint8Array> {
   // Never let the offscreen doc (extension origin, holds host_permissions) fetch
   // an arbitrary host — only fbcdn tracks. Blocks SSRF via a forged audio/video URL.
   if (!isFbcdn(url)) throw new Error('Track URL not allowed.');
+  const ctrl = new AbortController();
+  let stalled = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = (): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      stalled = true;
+      ctrl.abort();
+    }, STALL_MS);
+  };
   try {
-    const res = await fetch(url, { credentials: 'omit', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    arm();
+    const res = await fetch(url, { credentials: 'omit', signal: ctrl.signal });
     if (!res.ok) throw new Error(`Couldn't fetch the track (${res.status}). The fbcdn URL may have expired — reload the Facebook page.`);
-    return new Uint8Array(await res.arrayBuffer());
+    if (!res.body) return new Uint8Array(await res.arrayBuffer());
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      arm(); // progress: reset the idle timer
+      chunks.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const c of chunks) {
+      out.set(c, at);
+      at += c.length;
+    }
+    return out;
   } catch (e) {
-    // AbortSignal.timeout rejects with a TimeoutError DOMException.
-    if ((e as Error)?.name === 'TimeoutError') {
+    if (stalled || (e as Error)?.name === 'AbortError') {
       throw new Error('The track download stalled and was aborted. The fbcdn URL may have expired — reload the Facebook page.');
     }
     throw e;
+  } finally {
+    clearTimeout(timer!);
   }
 }
 

@@ -1374,8 +1374,10 @@ async function init(): Promise<void> {
   setupSettings();
   localize();
 
+  // Cosmetic: never let a missing getManifest (odd fork) break the init tail.
+  const version = chrome.runtime?.getManifest?.().version;
   const versionEl = document.getElementById('version');
-  if (versionEl) versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+  if (versionEl && version) versionEl.textContent = `v${version}`;
 
   byId('bulk-dl').addEventListener('click', () => void runBulk());
 

@@ -26,6 +26,10 @@
 }
 
 :root {
+  /* The panel commits to a dark surface; tell the UA so the chrome it owns —
+     scrollbar thumbs, native <select> popups — renders dark to match instead of
+     falling back to light on a light-themed OS. */
+  color-scheme: dark;
   /* Surfaces — a blue-black canvas, cards one step up, a subtler tint for inputs
      and the selection tray. */
   --canvas: #0E1420;      /* bg-canvas */
@@ -841,7 +845,10 @@ body::before {
 }
 .set-input.mono { font: 400 11px/16px var(--font-mono); }
 .set-input:focus-visible { outline: none; border-color: var(--accent); }
-.set-row .select { width: 118px; flex: none; }
+/* Size to the widest option (capped) instead of a fixed 118px: the Spanish
+   'Más nuevo primero' overflowed the fixed box and truncated to an ellipsis. */
+.set-row .select { width: auto; min-width: 118px; max-width: 168px; flex: 0 1 auto; }
+.set-row .set-copy, .set-row .set-title { min-width: 0; }
 
 .settings-rights {
   margin: 4px 0 0;
@@ -904,3 +911,18 @@ body::before {
 }
 .lang-toggle button.is-active { background: var(--accent); color: var(--on-accent); }
 .lang-toggle.is-disabled { opacity: 0.4; pointer-events: none; }
+
+/* ── Environment adaptations ─────────────────────────────────────────────────── */
+
+/* Below the two-column comfort floor (the panel drags down to ~320px), stack the
+   card grid so thumbnails and labels stay legible instead of cramping. */
+@media (max-width: 360px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+/* Honour an OS reduce-motion preference: the live-dot pulse and the download
+   spinner still read as static indicators (a ring, a dot) without animating. */
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .card-dl.busy::after { animation: none; }
+}

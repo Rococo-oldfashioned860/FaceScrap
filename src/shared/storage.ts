@@ -51,6 +51,17 @@ function serialQueue(): (task: () => Promise<void>, onError: (err: unknown) => v
   };
 }
 
+// chrome.storage.session shares a ~10MB budget across all tabs. A small
+// single-key write (playing/recent/bind) can't shed bytes of its own to
+// recover — but swallowing its failure silently hides that now-playing or the
+// track fallback stopped updating. Log it so a persistent quota problem is at
+// least visible in the service worker console, like addMedia's failure is.
+const logWriteError =
+  (label: string) =>
+  (err: unknown): void => {
+    console.error(`[FaceScrap] ${label} write failed`, err);
+  };
+
 const enqueueWrite = serialQueue();
 
 /** Merge new captures for a tab; resolves with the stored item count (for the
@@ -139,7 +150,7 @@ const playingKey = (tabId: number): string => `playing_${tabId}`;
 const enqueuePlaying = serialQueue();
 
 export function setPlaying(tabId: number, ref: PlayingRef): Promise<void> {
-  return enqueuePlaying(() => chrome.storage.session.set({ [playingKey(tabId)]: ref }), () => {});
+  return enqueuePlaying(() => chrome.storage.session.set({ [playingKey(tabId)]: ref }), logWriteError('playing'));
 }
 
 export async function getPlaying(tabId: number): Promise<PlayingRef | null> {
@@ -179,7 +190,7 @@ export function setRecent(tabId: number, url: string, at: number): Promise<void>
     cur.push({ url, at });
     if (cur.length > RECENT_MAX) cur.splice(0, cur.length - RECENT_MAX);
     await chrome.storage.session.set({ [key]: { tracks: cur } satisfies RecentRef });
-  }, () => {});
+  }, logWriteError('recent'));
 }
 
 export async function getRecent(tabId: number): Promise<RecentRef | null> {
@@ -208,7 +219,7 @@ const enqueueBind = serialQueue();
 export function setBind(tabId: number, state: BindState): Promise<void> {
   return enqueueBind(async () => {
     await chrome.storage.session.set({ [bindKey(tabId)]: state });
-  }, () => {});
+  }, logWriteError('bind'));
 }
 
 export async function getBind(tabId: number): Promise<BindState | null> {
