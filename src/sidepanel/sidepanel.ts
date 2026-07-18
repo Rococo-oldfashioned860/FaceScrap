@@ -110,10 +110,20 @@ const lastFailed = new Set<string>();
  *  tag or quality pick. cardBusy is deliberately left alone: an in-flight
  *  download owns its entry and removes it when it settles. */
 function pruneTabState(tid: number): void {
+  tabResetGen.set(tid, (tabResetGen.get(tid) ?? 0) + 1);
   const prefix = `${tid}:`;
   for (const k of [...lastFailed]) if (k.startsWith(prefix)) lastFailed.delete(k);
   for (const k of [...qualityChoice.keys()]) if (k.startsWith(prefix)) qualityChoice.delete(k);
 }
+// Bumped by pruneTabState. A download that settles AFTER its tab's state was
+// pruned must not re-seed lastFailed: the failure belongs to wiped content
+// (the navigation that pruned is often what killed the merge — expired fbcdn
+// URLs), and the tag would resurface as a phantom on the next recapture of the
+// same content-derived id. Settle paths snapshot the generation at start and
+// skip their add when it moved. One counter per tab, never deleted: a closed
+// tab's bump must stay visible to a download still draining.
+const tabResetGen = new Map<number, number>();
+const resetGen = (tid: number | undefined): number => (tid === undefined ? 0 : (tabResetGen.get(tid) ?? 0));
 // Tabs closed while this panel document lived. A download or bulk queue that
 // snapshotted its tid keeps draining after the tab closes, and writing its
 // receipts would recreate the saved_ key purgeTab just removed — the serial
@@ -445,16 +455,20 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   const bkey = tabKey(tid, cardId);
   if (offscreenBusyHere()) return;
   const receipt = savedEntryFor(cardId, item);
+  const gen = resetGen(tid);
   cardBusy.add(bkey);
   lastFailed.delete(bkey);
   await render(); // busy/failed are signature terms; render() sees them flip
   const ok = await downloadOne(tid, item, receipt);
   // Busy/failed are tab-namespaced, so this bookkeeping can never tag another
-  // tab's card — it runs unconditionally (the old clear-on-switch model instead
-  // dropped it, leaving a phantom busy entry). Only the repaint is scoped: a
-  // panel showing another tab repaints just the globally-gated tray.
+  // tab's card (the old clear-on-switch model instead dropped it, leaving a
+  // phantom busy entry). The failure tag additionally checks the reset
+  // generation: a prune during the await (nav reset, Clear, tab close) means
+  // this failure belongs to wiped content and must not re-seed the tag it just
+  // removed. Only the repaint is scoped: a panel showing another tab repaints
+  // just the globally-gated tray.
   cardBusy.delete(bkey);
-  if (!ok) lastFailed.add(bkey);
+  if (!ok && resetGen(tid) === gen) lastFailed.add(bkey);
   if (tid === tabId) {
     await render();
   } else {
@@ -937,6 +951,7 @@ async function runBulk(): Promise<void> {
   // flips module `tabId` on a tab switch — these picks, and the saved marks they
   // earn, belong to the tab that made them.
   const tid = tabId;
+  const gen = resetGen(tid);
   // Receipts freeze at queue-build time too: by the time an item's turn comes,
   // a navigation wipe may have rebuilt cardsById empty and the receipt would
   // lose its thumb/duration.
@@ -967,16 +982,21 @@ async function runBulk(): Promise<void> {
   } finally {
     bulkRunning = false;
     bulkTab = undefined;
-    // Failure tags are tab-namespaced, so this bookkeeping is safe even if the
-    // panel followed a tab switch mid-queue (the switch already emptied
-    // `selected`, so the unpick loop is a no-op there). Unpick only what landed:
-    // a failure keeps its pick, so pressing Download again retries exactly the
-    // items that didn't make it.
+    // Unpick only what landed — a failure keeps its pick, so pressing Download
+    // again retries exactly the items that didn't make it — and only while the
+    // panel still shows the tab that ran this queue: `selected` is NOT
+    // tab-namespaced and content-derived ids collide across tabs, so after a
+    // switch these deletes would silently empty picks the user just made in the
+    // OTHER tab. Failure tags are tab-namespaced (always safe to delete), but
+    // their adds check the reset generation: a nav reset/Clear mid-queue means
+    // the failures belong to wiped content — see tabResetGen.
     for (const id of done) {
-      selected.delete(id);
+      if (tid === tabId) selected.delete(id);
       lastFailed.delete(tabKey(tid, id));
     }
-    for (const id of failed) lastFailed.add(tabKey(tid, id));
+    if (resetGen(tid) === gen) {
+      for (const id of failed) lastFailed.add(tabKey(tid, id));
+    }
     if (tid === tabId) {
       lastRenderSig = ''; // the saved list and the failure tags feed the cards
       await render();
@@ -1298,24 +1318,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // New media captured (or cleared) for the tracked tab → re-render live. Only keys
-  // for OUR tab matter — other tabs' churn must not force extra renders.
+  // for OUR tab force a render — but hard resets are honored for EVERY tab.
   chrome.storage.session.onChanged.addListener((changes) => {
+    // A nav/close reset (clearTab) removes media_/playing_/recent_/bind_ for a
+    // tab (newValue undefined) — and it hits BACKGROUND tabs too: any top-level
+    // Facebook navigation (a tab-strip reload, a redirect) wipes a tab the user
+    // isn't looking at. Treat every such deletion as a hard reset for ITS tab,
+    // not just the tracked one: purge that tab's in-memory bindings + last-live
+    // and cancel any pending flush, so a debounced write can't resurrect bind_
+    // after it was wiped — and drop its failure tags and quality picks, because
+    // a recapture of the same content-derived id after the navigation is a NEW
+    // item and a phantom "failed" tag or stale pick lies. This state survives
+    // tab switches by design, so a background wipe missed here would resurface
+    // when the user switches back.
+    for (const [key, ch] of Object.entries(changes)) {
+      if (ch.newValue !== undefined) continue;
+      const m = /^(?:media|playing)_(\d+)$/.exec(key);
+      if (m) {
+        const wiped = Number(m[1]);
+        purgeTabBindings(wiped);
+        pruneTabState(wiped);
+      }
+    }
     if (tabId === undefined) return;
     const tid = tabId;
-    // A nav/close reset (clearTab) removes media_/playing_/recent_/bind_ for the tab
-    // (newValue undefined). The panel document survives an F5, so treat that
-    // deletion as a hard reset: purge this tab's in-memory bindings + last-live and
-    // cancel any pending flush, so a debounced write can't resurrect bind_ after it
-    // was wiped and the panel stops showing the pre-reload video.
-    const mediaCh = changes[`media_${tid}`];
-    const playingCh = changes[`playing_${tid}`];
-    if ((mediaCh && mediaCh.newValue === undefined) || (playingCh && playingCh.newValue === undefined)) {
-      purgeTabBindings(tid);
-      // The wiped items' failure tags and quality picks must go too: a recapture
-      // of the same content-derived id after this navigation is a NEW item, and
-      // rendering it with a phantom "failed" tag or a stale pick lies.
-      pruneTabState(tid);
-    }
     if (
       `media_${tid}` in changes ||
       `playing_${tid}` in changes ||
