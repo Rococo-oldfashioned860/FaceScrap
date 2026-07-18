@@ -91,15 +91,22 @@ decrypted.
 `npm run dev` rebuilds on save, `npm run check` runs the type check plus the
 unit suite, and `npm run build` produces the loadable `dist/`.
 
-## Load in Chrome
+## Install
 
-1. `npm install`, then `npm run build`
-2. Open `chrome://extensions`
-3. Enable **Developer mode**
-4. **Load unpacked** → select the **`dist/`** folder
-5. On a **facebook.com** tab, click the FaceScrap toolbar icon → the **side
+Get the extension folder either way:
+
+- **No build tools** — download `FaceScrap-vX.Y.Z.zip` from
+  [Releases](https://github.com/Hydza/FaceScrap/releases) and extract it.
+- **From source** — `npm install`, then `npm run build`; the folder is `dist/`.
+
+Then load it in Chrome:
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. **Load unpacked** → select the folder from above
+4. On a **facebook.com** tab, click the FaceScrap toolbar icon → the **side
    panel** opens (the icon stays disabled on other sites).
-6. With the panel open, play a reel/story/highlight: media appears live. (The
+5. With the panel open, play a reel/story/highlight: media appears live. (The
    side panel stays open while you interact with the page, unlike a popup.)
 
 ## Structure
