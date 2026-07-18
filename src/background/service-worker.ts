@@ -338,10 +338,12 @@ const OFFSCREEN_IDLE_MS = 60_000;
 // exec ≈ 95s worst case), but if the offscreen dies outright — a lost message, a
 // wedged ffmpeg exec — the SW would await forever and stay pinned by the
 // keepalive. On expiry runDownloadDash throws, downloadDash's .finally clears
-// inflightDownloads, and a retry is no longer a no-op against a dead in-flight
-// promise. The panel's own timeout is a much larger hang backstop (360s), sized
-// for a queue of jobs, so a queued job no longer times out over work that was
-// going to land.
+// inflightDownloads, a retry is no longer a no-op against a dead in-flight
+// promise, and the offscreen document is torn down (see the timeout catch in
+// runDownloadDash) so a mux that is wedged-but-alive can't keep occupying the
+// offscreen muxQueue while the next chained job's clock runs. The panel's own
+// timeout is a much larger hang backstop (360s), sized for a queue of jobs, so
+// a queued job no longer times out over work that was going to land.
 const MUX_TIMEOUT_MS = 115_000;
 
 function pairKey(videoUrl: string, audioUrl: string): string {
@@ -402,11 +404,28 @@ async function runDownloadDash(videoUrl: string, audioUrl: string, filename: str
 
   try {
     await ensureOffscreen();
-    const res = (await withTimeout(
-      chrome.runtime.sendMessage({ type: 'FACESCRAP_MUX', videoUrl, audioUrl } satisfies MuxMsg),
-      MUX_TIMEOUT_MS,
-      'The merge timed out.',
-    )) as MuxResponse | undefined;
+    let res: MuxResponse | undefined;
+    try {
+      res = (await withTimeout(
+        chrome.runtime.sendMessage({ type: 'FACESCRAP_MUX', videoUrl, audioUrl } satisfies MuxMsg),
+        MUX_TIMEOUT_MS,
+        'The merge timed out.',
+      )) as MuxResponse | undefined;
+    } catch (e) {
+      // A timed-out mux is usually still RUNNING over there — withTimeout only
+      // stops waiting, and there is no cancel message. Left alive, the wedged
+      // exec keeps the offscreen muxQueue busy while the NEXT chained job's
+      // clock runs, cascading false timeouts through everything queued behind
+      // it (the queue-wait-burns-the-budget bug one layer down). Tear the
+      // document down so the wedge dies with it; the next job recreates a
+      // fresh one. Acceptable collateral: this job was already reported
+      // failed, and a prior job's pending blob download has near-always
+      // settled by now (blob→disk lands in well under a second). A rejected
+      // sendMessage (offscreen already gone) takes this path too — the close
+      // is then a no-op.
+      chrome.offscreen.closeDocument().catch(() => {});
+      throw e;
+    }
     if (res?.ok !== true || !res.blobUrl) {
       throw new Error((res?.ok === false ? res.error : undefined) || 'Could not merge audio and video.');
     }
