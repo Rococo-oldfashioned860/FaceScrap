@@ -1432,17 +1432,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // (until the ring expires and turns itself off). Otherwise the grids are
   // storage-driven — ticking them too would re-read the tab's keys for nothing.
   //
-  // Now Playing ticks at 1s, the grids every other tick: selectPlaying's relay
-  // holds (the 1.5s pre-slide-evidence hold, the 4s capture wait) expire
-  // BETWEEN storage events, so the tick is what observes the expiry — at 2s it
-  // could more than double a 1.5s hold into a ~3.5s perceived handover. The
-  // grids paint nothing that decays faster than the live ring, so their
-  // effective cadence stays 2s.
+  // Now Playing ticks at 500ms, the grids every 4th tick (2s): selectPlaying's
+  // relay holds (the 1.5s pre-slide-evidence hold, the 4s capture wait) expire
+  // BETWEEN storage events, so the tick is what observes the expiry — a slow
+  // tick stretches a 1.5s hold well past 2.5s of perceived handover, which is
+  // exactly where rapid story/reel switching felt laggy. The cost is two
+  // storage reads and a signature compute per tick, only while the live view
+  // is open; the sig short-circuits all DOM work. The grids paint nothing
+  // that decays faster than the live ring, so their cadence stays 2s.
   let tickN = 0;
   window.setInterval(() => {
     tickN++;
-    if (view === 'now' || (anyLiveCards && tickN % 2 === 0)) void render();
-  }, 1000);
+    if (view === 'now' || (anyLiveCards && tickN % 4 === 0)) void render();
+  }, 500);
 
   // Best-effort: persist learning captured within the 1s debounce window when the
   // panel is torn down.

@@ -378,11 +378,18 @@ document.addEventListener(
     scrollTimer = window.setTimeout(() => {
       scrollTimer = undefined;
       detectPlaying();
-    }, 400);
+    }, 200);
   },
   { capture: true, signal: listeners.signal },
 );
-poller = window.setInterval(detectPlaying, 1000);
+// 300ms, not a lazy 1s: media events fire DURING slide transitions — when the
+// viewport centre still shows the outgoing slide — so the change-guard swallows
+// that emission and the poller is what actually detects the settled new slide.
+// Every ms of detection lag also shifts PlayingRef.at (slideAt) late, which
+// misclassifies the new video's first tracks as pre-slide evidence and makes
+// the panel's anti-prefetch relay hold bite when it shouldn't. centreMedia is
+// one elementsFromPoint walk plus a <video> scan — cheap at this rate.
+poller = window.setInterval(detectPlaying, 300);
 
 // Returning to the tab fires no media event (the video is already loaded) and the 1s
 // poller is throttled while the tab is hidden, so force a fresh emit (clear the
