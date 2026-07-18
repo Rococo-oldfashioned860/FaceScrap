@@ -322,25 +322,25 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   const activeSig = `${[...active].sort().join(',')}|${ref?.mark ?? ''}`;
   const blind = active.size === 0 && (ref?.mark ?? '') === '';
   const prev = lastLive.get(tid);
-  // Best candidate OUTSIDE the remembered set — the remembered video's own
-  // residual tracks often outscore a just-started next video, so the relay
-  // decision must exclude them or back-to-back videos never hand over.
-  const bestOther = prev != null ? ranked.find(([g]) => !prev.keys.has(g))?.[0] : undefined;
-  const bestOtherFresh = bestOther != null && now - (fetchNewest.get(bestOther) ?? 0) < FETCH_FRESH_MS;
-  // Stale candidates (outside the streaming window) are ambiguous: the tray
-  // prefetches several cards in ONE burst, their timestamps are near-identical,
-  // and recency can't tell card N from N+1 — relaying to a guess would endorse
-  // (and durably coverBind-learn) the wrong video. A stale candidate is
-  // relayable only when it is the ONLY one; otherwise behave as pre-widening
-  // (no candidate → the honest-empty path), and let real evidence decide later.
-  const otherCount = prev != null ? ranked.filter(([g]) => !prev.keys.has(g)).length : 0;
-  const bestOtherRelayable =
-    bestOther != null &&
-    (now - (fetchNewest.get(bestOther) ?? 0) < STREAM_SEED_MS || otherCount === 1);
-  // Did the candidate stream AFTER this slide appeared? Pre-slide-only evidence
-  // (residue of two slides ago, mid-watch prefetch) must not win a relay off a
-  // signature change, or rapid swiping lands on the n-2 video.
-  const bestOtherSinceSlide = bestOther != null && (fetchNewest.get(bestOther) ?? 0) >= slideAt;
+  // A relay is only as good as its evidence, and the only evidence that IDs
+  // "the video of THIS slide" is an ANCHORED stream: the candidate's first
+  // post-slide track near the slide start (the markBind learn gate's anchor).
+  // Everything else is a guess — window residue can't tell tray card N from
+  // N+1 (one prefetch burst, near-identical timestamps), and a mid-watch
+  // prefetch of a DEEPER tray bucket streams fresh and post-slide yet belongs
+  // to a story two profiles down; both guesses were observed painting the
+  // wrong story as playing, and endorse() would durably learn the error into
+  // coverBind. On blind surfaces (no ids, no mark) the signature can't change,
+  // slideAt goes stale, and no anchor can form — there the old freshness-based
+  // takeover is the only relay there is.
+  const relayable = (g: string): boolean =>
+    (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS ||
+    (blind && now - (fetchNewest.get(g) ?? 0) < FETCH_FRESH_MS);
+  // Best RELAYABLE candidate OUTSIDE the remembered set — the remembered
+  // video's own residual tracks often outscore a just-started next video, so
+  // the relay decision must exclude them or back-to-back videos never hand
+  // over.
+  const bestOther = prev != null ? ranked.find(([g]) => !prev.keys.has(g) && relayable(g))?.[0] : undefined;
   const prevNewest = prev != null ? Math.max(0, ...[...prev.keys].map((k) => fetchNewest.get(k) ?? 0)) : 0;
   const prevStreaming = prev != null && now - prevNewest < FETCH_FRESH_MS;
 
@@ -400,32 +400,35 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       if (now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS) endorse(new Set([seed]));
     }
   } else if (
-    bestOtherRelayable &&
     bestOther != null &&
     !captureWait &&
-    ((activeSig !== prev.seenActive && (bestOtherSinceSlide || now - slideAt > 1500)) ||
-      (blind && bestOtherFresh && now - prev.at > PLAYING_TAKEOVER_MS))
+    (activeSig !== prev.seenActive || (blind && now - prev.at > PLAYING_TAKEOVER_MS))
   ) {
     // DEFINITE slide change (marker/cover signature differs from the one the
-    // remembered video was endorsed under) → relay to the best other candidate,
-    // preferring one that streamed since this slide appeared; pre-slide-only
-    // evidence gets a 1.5s hold so the real video's first track wins the race
-    // (falling back covers a video served 100% from prefetch cache). Deferring
-    // does NOT consume the signature — seenActive is only written by endorse —
-    // so the relay stays armed. While the user stays on the same slide the
-    // signature never changes and a background prefetch can never win.
+    // remembered video was endorsed under) → relay to the best ANCHORED
+    // candidate, immediately: the anchor already proves its stream began with
+    // this slide, so the old 1.5s pre-slide-evidence hold is unnecessary — it
+    // existed precisely because unanchored evidence couldn't be trusted, and
+    // unanchored candidates no longer relay at all. Deferring (no anchored
+    // candidate yet) does NOT consume the signature — seenActive is only
+    // written by endorse — so the relay stays armed while the real video's
+    // first track is still in flight. While the user stays on the same slide
+    // the signature never changes and a background prefetch can never win.
     endorse(new Set([bestOther]));
   } else if (
     activeSig !== prev.seenActive &&
     ref?.hasVideo === true &&
-    !bestOtherRelayable &&
+    bestOther == null &&
     !captureWait &&
     now - slideAt > 1500
   ) {
-    // Definite slide change to a video with NO candidate evidence at all (e.g.
-    // revisiting a fully-buffered video whose window expired): drop the stale
-    // memory — an honest empty beats pinning the previous video for 5 minutes.
-    // (A same-blob revisit never reaches here: markBind rescues it as domLive.)
+    // Definite slide change to a video with NO anchored candidate (a fully
+    // buffered video that fetches nothing, or only guess-grade residue and
+    // deep-prefetch candidates in the window): drop the stale memory after a
+    // 1.5s grace for the real video's first track — an honest empty beats both
+    // pinning the previous video for 5 minutes and painting a guessed
+    // neighbour. (A same-blob revisit never reaches here: markBind rescues it
+    // as domLive.)
     lastLive.delete(tid);
   } else if (prevStreaming) {
     // Refresh only on FRESH streaming — window residue must not keep a finished
