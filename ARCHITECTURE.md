@@ -40,14 +40,17 @@ bundling it, or passing `classWorkerURL` spawns a module worker and breaks
 
 ## Verifying a change
 
-There is no test framework. Verification is, in order:
+In order:
 
 ```bash
-npm run typecheck   # tsc --noEmit
+npm run typecheck   # tsc --noEmit over src/ and tests/
+npm test            # bundles tests/*.test.ts with esbuild, runs node --test
 npm run build       # must succeed; icons + bundle → dist/
 ```
 
-Then load unpacked from `dist/` at `chrome://extensions` and play a reel on a
-facebook.com tab with the side panel open. Typecheck passing is not evidence the
-capture path works — the GraphQL and DOM layers are only exercised in a real
-browser against real Facebook.
+The unit suite covers the storage-backed now-playing logic (mark provenance,
+learned bindings, buffered-revisit rescue) against the `chrome.storage` fake in
+`tests/chrome-fake.ts`. It does NOT touch the capture path: the GraphQL and DOM
+layers are only exercised in a real browser — load unpacked from `dist/` at
+`chrome://extensions` and play a reel on a facebook.com tab with the side panel
+open before calling a capture-path change verified.

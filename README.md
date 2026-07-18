@@ -83,7 +83,8 @@ decrypted.
 npm install        # once
 npm run build      # icons + bundle → dist/
 npm run dev        # rebuild on save (watch)
-npm run typecheck  # tsc --noEmit
+npm run typecheck  # tsc --noEmit (src and tests)
+npm test           # unit suite (node --test via esbuild)
 ```
 
 ## Load in Chrome

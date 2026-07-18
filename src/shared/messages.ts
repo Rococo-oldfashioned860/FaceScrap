@@ -71,6 +71,5 @@ export interface ClearTabMsg {
   type: 'FACESCRAP_CLEAR_TAB';
   tabId: number;
 }
-export type ClearTabResponse = { ok: true } | { ok: false; error: string };
 
 export type RuntimeMessage = MediaFoundMsg | NowPlayingMsg | DownloadDashMsg | MuxMsg | RevokeMsg | ClearTabMsg;

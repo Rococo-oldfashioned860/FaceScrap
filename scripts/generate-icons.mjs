@@ -2,9 +2,9 @@
 // A hand-rolled PNG encoder (RGBA) using Node's built-in zlib.
 //
 // Draws the FaceScrap "Scrapbook" mark: a saved Facebook memory mounted as a
-// photo card — a light card with a blue (accent) frame, a blue landscape
-// (sun + two mountains) inside, and a gold media badge with a play glyph at the
-// bottom-right corner. The geometry and palette are PARSED out of the inline
+// photo card — a light card with a blue (accent) frame, a landscape inside
+// (gold sun, two blue mountains), and a gold media badge with a play glyph at
+// the bottom-right corner. The geometry and palette are PARSED out of the inline
 // SVG in src/sidepanel/sidepanel.html at build time — the HTML is the single
 // source of truth, so reshaping the logo there reshapes these PNGs, and any
 // unparseable drift fails the build instead of silently forking the mark.
