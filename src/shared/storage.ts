@@ -254,14 +254,23 @@ function isSavedEntry(x: unknown): x is SavedEntry {
  *  the ledger, whether new or refreshing an existing row. */
 function sanitizeEntry(e: SavedEntry): SavedEntry {
   const out: SavedEntry = {
-    id: e.id.slice(0, 256), // matches the media.ts id bound
+    // The card-id contract: a 2-char 'v:'/'i:' prefix over media.ts's 256-char
+    // item-id bound. Slicing at 256 truncated a max-length id, and a truncated
+    // receipt can never re-link to its live card.
+    id: e.id.slice(0, 258),
     kind: e.kind,
     source: e.source,
     savedAt: e.savedAt,
   };
-  if (e.thumbUrl != null && e.thumbUrl.length <= SAVED_THUMB_MAX && isFbcdn(e.thumbUrl)) out.thumbUrl = e.thumbUrl;
-  if (e.resLabel != null) out.resLabel = e.resLabel.slice(0, SAVED_LABEL_MAX);
-  if (e.durationSec != null && Number.isFinite(e.durationSec)) out.durationSec = e.durationSec;
+  // Optional fields are NOT validated by isSavedEntry, and this runs on every
+  // persisted row (readSaved), so each check must also carry the type test — a
+  // malformed field from a corrupt or foreign write must degrade to absent,
+  // never throw and take the whole ledger read down with it.
+  if (typeof e.thumbUrl === 'string' && e.thumbUrl.length <= SAVED_THUMB_MAX && isFbcdn(e.thumbUrl)) {
+    out.thumbUrl = e.thumbUrl;
+  }
+  if (typeof e.resLabel === 'string') out.resLabel = e.resLabel.slice(0, SAVED_LABEL_MAX);
+  if (typeof e.durationSec === 'number' && Number.isFinite(e.durationSec)) out.durationSec = e.durationSec;
   return out;
 }
 
@@ -305,8 +314,11 @@ export function addSaved(tabId: number, entry: SavedEntry): Promise<void> {
         // The byte budget is an estimate against a SHARED quota another tab may
         // have filled: as a last resort drop the oldest half of the history and
         // retry once (the same pattern addMedia uses); a second failure hits the
-        // queue's onError.
+        // queue's onError. Never the receipt being written: on a short ledger
+        // the "oldest half" IS the new entry (or the row it refreshed), and
+        // dropping it would resolve as success while losing the row.
         cur.splice(0, Math.ceil(cur.length / 2));
+        if (!cur.some((x) => x.id === e.id)) cur.push(e);
         await chrome.storage.session.set({ [key]: cur });
       }
     },
@@ -339,20 +351,30 @@ export function clearTab(tabId: number): Promise<void> {
   ]).then(() => undefined);
 }
 
+/** Remove one tab's saved_ key on THIS context's write chain. A serialQueue
+ *  orders tasks only within its own JS context, and every addSaved runs in the
+ *  panel — so the worker's purgeTab removal below cannot be ordered against a
+ *  panel receipt write that was already enqueued when the tab closed; it would
+ *  land after the removal and resurrect the key as an orphan. Each context
+ *  that writes receipts calls this from its own tabs.onRemoved instead, so its
+ *  in-flight writes land first and its removal wins. */
+export function dropSaved(tabId: number): Promise<void> {
+  return enqueueSaved(
+    () => chrome.storage.session.remove(savedKey(tabId)),
+    (err) => console.error('[FaceScrap] storage clear failed', err),
+  );
+}
+
 /** Full teardown for a CLOSED tab: the capture state AND the download history.
  *  Chrome does not reuse tab ids within a session, so a dead tab can never
  *  render its Saved view again — leaving saved_ would orphan the key in
- *  storage.session until the browser exits. The removal rides the same
- *  enqueueSaved chain as addSaved, so an already-enqueued receipt write can't
- *  land after it. (A write enqueued AFTER this — a bulk queue still draining
- *  when its tab closed — would recreate the key; the panel guards that with a
- *  dead-tab check before every addSaved.) */
+ *  storage.session until the browser exits. This removal rides the WORKER's
+ *  enqueueSaved chain, which orders it against nothing the panel has enqueued
+ *  (see dropSaved — the panel mirrors the removal on its own chain for that);
+ *  here it covers the no-panel case, and the panel's dead-tab check before
+ *  every addSaved stops writes enqueued after the close. */
 export function purgeTab(tabId: number): Promise<void> {
-  const fail = (err: unknown): void => console.error('[FaceScrap] storage clear failed', err);
-  return Promise.all([
-    clearTab(tabId),
-    enqueueSaved(() => chrome.storage.session.remove(savedKey(tabId)), fail),
-  ]).then(() => undefined);
+  return Promise.all([clearTab(tabId), dropSaved(tabId)]).then(() => undefined);
 }
 
 // --- Runtime capability flags (published by the SW, read by the panel/popup) ---

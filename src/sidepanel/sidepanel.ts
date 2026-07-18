@@ -18,7 +18,7 @@ import {
 } from '../shared/media';
 import { fmt, getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n';
 import { withTimeout } from '../shared/async';
-import { addSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
+import { addSaved, dropSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../shared/settings';
 import {
   DASH_UI_TIMEOUT_MS,
@@ -1378,6 +1378,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     forgetLastLive(id);
     pruneTabState(id);
     deadTabs.add(id);
+    // Mirror the SW's saved_ removal on THIS context's write chain: a receipt
+    // write already enqueued here when the tab closed would land after the
+    // worker's remove (serial queues are per-JS-context) and resurrect the key
+    // as an orphan — only our own chain can order against our own writes.
+    void dropSaved(id);
   });
 
   // Keep language and settings in sync if another view (a second panel in another
