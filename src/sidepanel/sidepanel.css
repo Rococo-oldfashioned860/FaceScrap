@@ -320,10 +320,16 @@ body::before {
 }
 .now-source { font: 400 11px/15px var(--font-body); letter-spacing: 0.2px; color: var(--text-muted); }
 
+/* Portrait-first: reels and stories are 9:16, and the old fixed 208px landscape
+   box cover-cropped most of them. 4/5 shows a vertical poster nearly whole
+   (letterboxed by the contain fit below), capped so short panels keep room for
+   the metadata under it. */
 .preview {
   position: relative;
   flex: none;
-  height: 208px;
+  height: auto;
+  aspect-ratio: 4 / 5;
+  max-height: 46vh;
   border-radius: var(--r-card);
   border: 1px solid var(--card-line);
   background: var(--media-wash);
@@ -340,13 +346,22 @@ body::before {
   pointer-events: none;
   background: linear-gradient(158deg, rgba(255, 255, 255, 0.16) 0%, transparent 38%);
 }
+/* Two stacked copies of the poster: a blurred cover-fit underlay fills the box
+   so the contain-fit sharp image above never sits on empty bars — the frame
+   reads as a lit backdrop instead of a crop. */
 .preview img {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+}
+.preview img.thumb-bg {
+  object-fit: cover;
+  transform: scale(1.15);
+  filter: blur(16px) saturate(1.15);
+  opacity: 0.5;
 }
 /* Play disc — decorative. The panel can't drive Facebook's player, so there is
    no live progress track; the disc marks the tile as a video and nothing more. */
@@ -579,9 +594,12 @@ body::before {
   box-shadow: var(--edge-top), var(--lift-1), 0 0 0 1px var(--accent), 0 6px 20px -8px rgba(77, 158, 255, 0.45);
 }
 
+/* Portrait-first, same rationale as .preview: the old 120px landscape thumb
+   cover-cropped over half of a vertical story. */
 .card-thumb {
   position: relative;
-  height: 120px;
+  height: auto;
+  aspect-ratio: 3 / 4;
   border-radius: var(--r-thumb);
   background: var(--media-wash);
   overflow: hidden;
@@ -590,7 +608,20 @@ body::before {
   justify-content: center;
   font-size: 22px;
 }
-.card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-thumb img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.card-thumb img.thumb-bg {
+  object-fit: cover;
+  transform: scale(1.15);
+  filter: blur(12px) saturate(1.15);
+  opacity: 0.5;
+}
 
 /* Play badge — a light disc holding a blue glyph, centred in a video thumbnail. */
 .card-thumb.is-video::after {

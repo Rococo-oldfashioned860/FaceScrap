@@ -672,15 +672,24 @@ function renderCard(card: Card): HTMLElement {
   };
 
   if (card.thumbUrl != null) {
+    // Blurred cover-fit underlay + sharp contain-fit image: vertical stories
+    // show whole in the portrait thumb instead of cropped (see .card-thumb).
+    const bg = document.createElement('img');
+    bg.className = 'thumb-bg';
+    bg.alt = '';
+    bg.loading = 'lazy';
+    bg.addEventListener('error', () => bg.remove());
     const img = document.createElement('img');
     img.alt = '';
     img.loading = 'lazy';
     img.addEventListener('error', () => {
       img.remove();
+      bg.remove();
       showIcon();
     });
+    bg.src = card.thumbUrl;
     img.src = card.thumbUrl;
-    thumb.appendChild(img);
+    thumb.append(bg, img);
   } else {
     showIcon();
   }
@@ -829,15 +838,25 @@ function paintNow(now: NowState | null): void {
 
   const preview = byId('now-preview');
   preview.classList.toggle('is-video', now.kind === 'video');
-  // A real poster as an <img> (so an expired/blocked fbcdn URL falls back to the
-  // gradient wash on error); rebuilt each paint.
-  preview.querySelector('img')?.remove();
+  // A real poster as an <img> pair — a blurred cover-fit underlay plus the
+  // sharp contain-fit image, so a vertical story shows whole instead of
+  // cropped (an expired/blocked fbcdn URL falls back to the gradient wash on
+  // error); rebuilt each paint.
+  preview.querySelectorAll('img').forEach((el) => el.remove());
   if (now.thumbUrl != null) {
+    const bg = document.createElement('img');
+    bg.className = 'thumb-bg';
+    bg.alt = '';
+    bg.addEventListener('error', () => bg.remove());
+    bg.src = now.thumbUrl;
     const img = document.createElement('img');
     img.alt = '';
-    img.addEventListener('error', () => img.remove());
+    img.addEventListener('error', () => {
+      img.remove();
+      bg.remove();
+    });
     img.src = now.thumbUrl;
-    preview.prepend(img);
+    preview.prepend(bg, img);
   }
   byId('now-badge').textContent = t(KIND_KEY[now.kind]);
   byId('now-dur').textContent = now.durationSec != null ? formatDuration(now.durationSec) : '';
