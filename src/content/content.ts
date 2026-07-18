@@ -148,10 +148,14 @@ function fbcdnCoverUrl(el: Element): string | undefined {
   return undefined;
 }
 
-/** Is any reasonably-sized <video> currently playing and visible? */
+/** Is any reasonably-sized <video> currently playing and visible?
+ *  No readyState gate: under Facebook's MSE-in-Workers the element's buffer
+ *  lives in the worker and the main-thread <video> reports readyState 0
+ *  FOREVER, even mid-playback — `!paused && !ended` is the only signal the
+ *  element still tells the truth about. */
 function anyVideoPlaying(): boolean {
   for (const v of document.querySelectorAll('video')) {
-    if (v.paused || v.ended || v.readyState < 2) continue;
+    if (v.paused || v.ended) continue;
     const r = v.getBoundingClientRect();
     if (
       r.width >= 100 &&
@@ -300,7 +304,13 @@ function centreMedia(): {
     let best: HTMLVideoElement | undefined;
     let bestScore = -1;
     for (const v of document.querySelectorAll('video')) {
-      if (v.ended || v.readyState < 2) continue;
+      // Only `ended` disqualifies. readyState is a lie under MSE-in-Workers
+      // (permanently 0 — see anyVideoPlaying), and it used to kill this whole
+      // fallback: the reels viewer routinely leaves the centre point over
+      // overlay DIVs (mid-snap, side rails), so the hit-test walk misses and
+      // THIS loop is the only path that can adopt the playing video. Paused,
+      // data-less prefetch slides still lose: the play boost below dominates.
+      if (v.ended) continue;
       const r = v.getBoundingClientRect();
       const vw = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
       const vh = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
