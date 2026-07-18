@@ -86,19 +86,9 @@ But the **DASH segments** the player downloads do cross the network. FaceScrap:
 `<ContentProtection>` (DRM) entries are detected and discarded: they cannot be
 decrypted.
 
-## Development
-
-```bash
-npm install        # once
-npm run build      # icons + bundle → dist/
-npm run dev        # rebuild on save (watch)
-npm run typecheck  # tsc --noEmit (src and tests)
-npm test           # unit suite (node --test via esbuild)
-```
-
 ## Load in Chrome
 
-1. `npm run build`
+1. `npm install`, then `npm run build`
 2. Open `chrome://extensions`
 3. Enable **Developer mode**
 4. **Load unpacked** → select the **`dist/`** folder
