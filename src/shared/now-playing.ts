@@ -10,10 +10,25 @@ import { fbAssetKeys, mediaId, trackKey, videoGroupKey, type MediaItem } from '.
 import { getBind, getPlaying, getRecent, setBind } from './storage';
 
 // An MSE-played video (blob: currentSrc, never in ref.ids) only matches via fetched
-// tracks, which age out 30s after streaming stops — so remember the LAST live video
-// per tab. The next video (or photo) that goes live REPLACES it (relay), so rows
-// never accumulate; the grace window is only a backstop for abandoned tabs.
+// tracks, which age out of the match window after streaming stops — so remember the
+// LAST live video per tab. The next video (or photo) that goes live REPLACES it
+// (relay), so rows never accumulate; the grace window is only a backstop for
+// abandoned tabs.
 const PLAYING_GRACE_MS = 5 * 60 * 1000;
+// How long a fetched track stays MATCHABLE. Wide on purpose: the stories tray
+// prefetches upcoming cards when the viewer opens, so by the time the user
+// reaches card N its tracks are minutes old — with a narrow window those
+// stories had NO matchable evidence when their slide arrived, and the relay
+// had nothing to hand over to (the same stories lagged on every single visit).
+// Width is safe because staleness is judged separately: takeovers and
+// streaming checks gate on FETCH_FRESH_MS, ranking is recency-first, seeding
+// an empty slot requires STREAM_SEED_MS-fresh evidence, and raw fetch matches
+// are never rendered directly (only domLive + the remembered video are).
+const TRACK_MATCH_WINDOW_MS = 120_000;
+// Seeding an EMPTY slot stays conservative: only a video streaming this
+// recently may claim it, so a panel opened cold can't resurrect a neighbour
+// prefetched a minute ago as "playing now".
+const STREAM_SEED_MS = 30_000;
 // How long the remembered video keeps its slot against a fetch-only candidate
 // when no evidence refreshes it. Short — a real "next video" should relay fast —
 // because the freshness gate below is what actually blocks prefetch takeovers.
@@ -142,11 +157,12 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   const active = new Set(ref?.ids ?? []);
   const now = Date.now();
 
-  // Fetched-track fallback: every fbcdn track streamed in the last 30s — only
-  // trusted while a <video> is actually centered, so a photo story doesn't
+  // Fetched-track fallback: every fbcdn track streamed within the match window —
+  // only trusted while a <video> is actually centered, so a photo story doesn't
   // surface a stale video. Precompute each track's match keys: efg asset ids
   // (canonical), mediaId (legacy numeric), trackKey (filename).
-  const tracks = ref?.hasVideo && recent ? recent.tracks.filter((t) => now - t.at < 30000) : [];
+  const tracks =
+    ref?.hasVideo && recent ? recent.tracks.filter((t) => now - t.at < TRACK_MATCH_WINDOW_MS) : [];
   const trackSigs = tracks.map((t) => ({
     assets: fbAssetKeys(t.url),
     mid: mediaId(t.url),
@@ -354,7 +370,11 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
             : a,
         )[0];
       }
-      endorse(new Set([seed]));
+      // The wide match window exists for RELAYS (a prefetched story must stay
+      // matchable when its slide finally arrives); claiming an EMPTY slot is
+      // held to actively-streaming evidence so a cold panel open can't
+      // resurrect an old prefetched neighbour as "playing now".
+      if (now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS) endorse(new Set([seed]));
     }
   } else if (
     bestOther != null &&

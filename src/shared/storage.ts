@@ -146,7 +146,13 @@ export interface RecentRef {
 }
 
 const recentKey = (tabId: number): string => `recent_${tabId}`;
-const RECENT_MAX = 8;
+// Sized with now-playing's TRACK_MATCH_WINDOW_MS in mind: the stories tray
+// prefetches several upcoming cards at open (video+audio track per card), and
+// at 8 slots a card's tracks were evicted long before the user reached it —
+// leaving the relay nothing to match. The panel derives keys lazily per
+// selectPlaying call, so the wider window costs a slightly longer scan, not
+// storage churn.
+const RECENT_MAX = 24;
 const enqueueRecent = serialQueue();
 
 export function setRecent(tabId: number, url: string, at: number): Promise<void> {
