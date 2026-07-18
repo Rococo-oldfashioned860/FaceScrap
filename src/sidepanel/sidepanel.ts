@@ -88,6 +88,12 @@ const cardBusy = new Set<string>();
 // decides who owns the button's label.
 let bulkRunning = false;
 let bulkTab: number | undefined;
+/** This panel is already driving the offscreen document — a bulk run, or any
+ *  single download whichever tab started it — so the tray must not start more.
+ *  The one predicate shared by the tray's enablement and runBulk's entry guard. */
+function offscreenBusyHere(): boolean {
+  return bulkRunning || cardBusy.size > 0;
+}
 // Cards whose last download attempt failed. There is no retry button in the
 // grid, so this only puts an honest tag on the card; the Now Playing button
 // turns into "Retry".
@@ -405,6 +411,18 @@ function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
   };
 }
 
+/** The one download core shared by the single-card and bulk paths: dispatch by
+ *  kind (DASH pair → remux, else direct) and, on success, persist the receipt
+ *  immediately — the download belongs to the SW and the browser, so a panel
+ *  closed mid-queue leaves the file on disk, and a receipt held in memory
+ *  would die with the document. Skips the write for a closed tab (deadTabs):
+ *  its saved_ key was just purged and must not resurrect. */
+async function downloadOne(tid: number | undefined, item: MediaItem, receipt: SavedEntry): Promise<boolean> {
+  const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
+  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
+  return ok;
+}
+
 /** Download one item (a card's or Now Playing's chosen target). Sequential with
  *  the bulk run — both drive the single offscreen document — so it refuses to
  *  start while a bulk run is going, and the tray refuses to start while a single
@@ -420,8 +438,7 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   cardBusy.add(bkey);
   lastFailed.delete(bkey);
   await render(); // busy/failed are signature terms; render() sees them flip
-  const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
-  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
+  const ok = await downloadOne(tid, item, receipt);
   // Busy/failed are tab-namespaced, so this bookkeeping can never tag another
   // tab's card — it runs unconditionally (the old clear-on-switch model instead
   // dropped it, leaving a phantom busy entry). Only the repaint is scoped: a
@@ -879,10 +896,9 @@ function paintTray(): void {
   byId('tray-meta').textContent = composeLine(kinds);
 
   const btn = byId<HTMLButtonElement>('bulk-dl');
-  // A run in flight, or a single card downloading, owns the offscreen document; the
-  // tray must not start a second. Enablement is global; only the label is tab-scoped
-  // — a run painting "Saving 2/3…" in its own tab must not be stamped over here.
-  btn.disabled = bulkRunning || cardBusy.size > 0;
+  // Enablement is global (offscreenBusyHere); only the label is tab-scoped — a
+  // run painting "Saving 2/3…" in its own tab must not be stamped over here.
+  btn.disabled = offscreenBusyHere();
   if (!bulkRunning || bulkTab !== tabId) btn.textContent = fmt('downloadSelected', { n });
   syncSelectAll();
 }
@@ -904,7 +920,7 @@ function syncSelectAll(): void {
  *  would fight over the single offscreen document, and the tray's progress label
  *  counts a queue, not a race. */
 async function runBulk(): Promise<void> {
-  if (bulkRunning || cardBusy.size > 0) return;
+  if (offscreenBusyHere()) return;
   // Snapshot the tab. The queue below awaits up to 120s per item, and onActivated
   // flips module `tabId` on a tab switch — these picks, and the saved marks they
   // earn, belong to the tab that made them.
@@ -933,12 +949,8 @@ async function runBulk(): Promise<void> {
       if (bulkTab === tabId && view !== 'now') {
         btn.textContent = fmt('bulkBusy', { i: i + 1, n: queue.length });
       }
-      const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
+      const ok = await downloadOne(tid, item, receipt);
       (ok ? done : failed).push(id);
-      // Persist each save as it lands, not as one batch at the end: the download
-      // belongs to the SW and the browser, so a panel closed mid-queue leaves the
-      // files on disk — a `done` bank still in memory would die with the document.
-      if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
     }
   } finally {
     bulkRunning = false;
