@@ -1430,11 +1430,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   // nothing. That state feeds Now Playing AND the grid cards' live ring, so the
   // tick runs for the live view and for any grid currently showing a live card
   // (until the ring expires and turns itself off). Otherwise the grids are
-  // storage-driven — ticking them too would re-read the tab's keys every 2s
-  // for nothing.
+  // storage-driven — ticking them too would re-read the tab's keys for nothing.
+  //
+  // Now Playing ticks at 1s, the grids every other tick: selectPlaying's relay
+  // holds (the 1.5s pre-slide-evidence hold, the 4s capture wait) expire
+  // BETWEEN storage events, so the tick is what observes the expiry — at 2s it
+  // could more than double a 1.5s hold into a ~3.5s perceived handover. The
+  // grids paint nothing that decays faster than the live ring, so their
+  // effective cadence stays 2s.
+  let tickN = 0;
   window.setInterval(() => {
-    if (view === 'now' || anyLiveCards) void render();
-  }, 2000);
+    tickN++;
+    if (view === 'now' || (anyLiveCards && tickN % 2 === 0)) void render();
+  }, 1000);
 
   // Best-effort: persist learning captured within the 1s debounce window when the
   // panel is torn down.
