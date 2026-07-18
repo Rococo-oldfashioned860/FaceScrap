@@ -28,6 +28,13 @@ export interface NowPlayingMsg {
   mark?: string;
 }
 
+/** How long the panel waits on FACESCRAP_DOWNLOAD_DASH before giving up (its
+ *  hang backstop; the SW's own per-job timeout is far tighter). Part of the
+ *  protocol, not a UI detail: the worker's retry-dedup window is derived from
+ *  it — if a retry after a UI timeout fell outside that window, it would run a
+ *  second full download instead of hitting the idempotent no-op. */
+export const DASH_UI_TIMEOUT_MS = 360_000;
+
 /** side panel → service worker: remux a DASH pair and download the result. */
 export interface DownloadDashMsg {
   type: 'FACESCRAP_DOWNLOAD_DASH';

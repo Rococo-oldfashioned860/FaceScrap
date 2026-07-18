@@ -20,7 +20,12 @@ import { fmt, getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n
 import { withTimeout } from '../shared/async';
 import { addSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../shared/settings';
-import type { ClearTabMsg, DownloadDashMsg, DownloadDashResponse } from '../shared/messages';
+import {
+  DASH_UI_TIMEOUT_MS,
+  type ClearTabMsg,
+  type DownloadDashMsg,
+  type DownloadDashResponse,
+} from '../shared/messages';
 import {
   flushBindingsNow,
   forgetLastLive,
@@ -353,12 +358,14 @@ function stripAudio(): boolean {
  *  either way — a bulk run must survive one bad item — and reports whether it
  *  landed. Failure/saved bookkeeping is the caller's: it is keyed by CARD, and an
  *  item does not know which card is downloading it. */
-// UI hang backstop only — it fires if the SW dies without closing the message
-// port. Correctness timeouts live in the SW (115s per job, measured from job
-// START; jobs run one at a time on its chain), so this outer bound is sized for
-// a realistic queue — a second card clicked in this panel plus another window's
-// job — never for a single merge.
-const DASH_UI_TIMEOUT_MS = 360_000;
+// DASH_UI_TIMEOUT_MS (shared, messages.ts) is a UI hang backstop only — it
+// fires if the SW dies without closing the message port. Correctness timeouts
+// live in the SW (115s per job, measured from job START; jobs run one at a time
+// on its chain), so the outer bound is sized for a realistic queue — this
+// panel's one job plus a couple of other windows' — never for a single merge.
+// The queue can hold at most one job per panel because offscreenBusyHere()
+// gates every download entry point; stacked singles would outrun this bound,
+// tagging landed work failed and dropping its Saved receipt.
 
 async function startDashDownload(item: MediaItem): Promise<boolean> {
   const audioUrl = item.audioUrl;
@@ -395,9 +402,10 @@ async function startDirectDownload(item: MediaItem): Promise<boolean> {
   }
 }
 
-/** Freeze a download receipt at click time: the download can await up to 120s,
- *  during which a tab switch or navigation wipe may rebuild `cardsById` with
- *  other content — the receipt must describe what was actually saved. */
+/** Freeze a download receipt at click time: the download can await minutes
+ *  (DASH_UI_TIMEOUT_MS), during which a tab switch or navigation wipe may
+ *  rebuild `cardsById` with other content — the receipt must describe what was
+ *  actually saved. */
 function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
   const card = cardsById.get(cardId);
   return {
@@ -424,16 +432,18 @@ async function downloadOne(tid: number | undefined, item: MediaItem, receipt: Sa
 }
 
 /** Download one item (a card's or Now Playing's chosen target). Sequential with
- *  the bulk run — both drive the single offscreen document — so it refuses to
- *  start while a bulk run is going, and the tray refuses to start while a single
- *  is going. Busy + failed state are keyed by card id and survive re-render. */
+ *  EVERYTHING this panel starts — bulk runs and other singles alike: the SW runs
+ *  DASH jobs one at a time, so stacked clicks would sit queued while each one's
+ *  UI backstop burned, and the queue's tail would be tagged failed (receipt
+ *  dropped) over work that then landed. One at a time keeps the backstop honest.
+ *  Busy + failed state are keyed by card id and survive re-render. */
 async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   // Snapshot the tab AND the receipt: the merge can await minutes, and
   // onActivated flips module `tabId` on a tab switch — the save belongs to the
   // tab and the card that were clicked.
   const tid = tabId;
   const bkey = tabKey(tid, cardId);
-  if (bulkRunning || cardBusy.has(bkey)) return;
+  if (offscreenBusyHere()) return;
   const receipt = savedEntryFor(cardId, item);
   cardBusy.add(bkey);
   lastFailed.delete(bkey);
@@ -696,7 +706,9 @@ function renderCard(card: Card): HTMLElement {
     dl.title = t('downloadItem');
     dl.setAttribute('aria-label', t('downloadItem'));
     dl.classList.toggle('busy', busy);
-    dl.disabled = busy || bulkRunning;
+    // Any in-flight download gates every button (not just this card's): the SW
+    // serializes jobs, so a stack of singles would outrun the UI backstop.
+    dl.disabled = offscreenBusyHere();
     const target = card.target;
     dl.addEventListener('click', () => void downloadCard(card.id, target));
   } else {
@@ -826,7 +838,7 @@ function paintNow(now: NowState | null): void {
   const paintMeta = (): void => {
     byId('m-resolution').textContent = target.kind === 'video' ? resolutionOf(target).label : '—';
     const busy = cardBusy.has(tabKey(tabId, now.id));
-    dl.disabled = busy || bulkRunning;
+    dl.disabled = offscreenBusyHere(); // same gate as the grid: one download at a time
     dl.textContent = busy
       ? target.audioUrl != null
         ? t('downloadMerging')
@@ -921,7 +933,7 @@ function syncSelectAll(): void {
  *  counts a queue, not a race. */
 async function runBulk(): Promise<void> {
   if (offscreenBusyHere()) return;
-  // Snapshot the tab. The queue below awaits up to 120s per item, and onActivated
+  // Snapshot the tab. The queue below can await minutes per item, and onActivated
   // flips module `tabId` on a tab switch — these picks, and the saved marks they
   // earn, belong to the tab that made them.
   const tid = tabId;

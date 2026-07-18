@@ -11,7 +11,7 @@
 import { withTimeout } from '../shared/async';
 import { addMedia, clearTab, purgeTab, setCaps, setPlaying, setRecent } from '../shared/storage';
 import { classifyNetworkRequest, isFbcdn, sanitizeIncomingItems, widenDashUrl, type MediaSource } from '../shared/media';
-import type { MuxMsg, MuxResponse, RevokeMsg, RuntimeMessage } from '../shared/messages';
+import { DASH_UI_TIMEOUT_MS, type MuxMsg, type MuxResponse, type RevokeMsg, type RuntimeMessage } from '../shared/messages';
 import { hasOffscreen, hasSidePanel } from '../shared/capabilities';
 
 // 0. Open the UI on toolbar click, adapting to the browser. sidePanel is
@@ -315,12 +315,16 @@ function startKeepalive(): () => void {
 }
 
 // A DASH download is identified by its (video, audio) track pair. The panel's
-// 120s UI timeout does NOT cancel the SW job and the button stays clickable, so
-// duplicates are collapsed: a concurrent request shares the one in-flight job,
-// and a request shortly after a completed download is an idempotent no-op.
+// UI timeout (DASH_UI_TIMEOUT_MS) does NOT cancel the SW job, and once the
+// panel gives up its button turns clickable again, so duplicates are collapsed:
+// a concurrent request shares the one in-flight job, and a request shortly
+// after a completed download is an idempotent no-op.
 const inflightDownloads = new Map<string, Promise<void>>();
 const recentlyDownloaded = new Map<string, number>();
-const DEDUP_WINDOW_MS = 150_000; // just over the panel's 120s timeout
+// Just past the panel's give-up point, and derived from it so the two can't
+// drift apart again: a retry clicked after a UI timeout must hit the no-op
+// above, never run a second full download of a file already on disk.
+const DEDUP_WINDOW_MS = DASH_UI_TIMEOUT_MS + 30_000;
 // A download normally settles in well under a second (blob → disk). Cap how long
 // we will keep the SW pinned alive waiting for a terminal state, so a download
 // that never reports one can't keep the worker awake forever.
