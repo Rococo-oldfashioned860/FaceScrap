@@ -231,6 +231,11 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   const fetchScore = new Map<string, number>();
   const fetchNewest = new Map<string, number>();
   const fetchOldest = new Map<string, number>();
+  // Oldest POST-slide track per group — the markBind learn gate's anchor. The
+  // global oldest is dragged arbitrarily far back by pre-slide prefetch residue
+  // inside the wide match window, which would silently block learning for a
+  // group that ALSO streamed genuine near-slide evidence.
+  const fetchOldestSince = new Map<string, number>();
   const trackMatched: boolean[] = new Array(trackSigs.length).fill(false);
   for (const i of items) {
     if (i.kind !== 'video') continue;
@@ -243,18 +248,23 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     let score = 0;
     let newest = 0;
     let oldest = Infinity;
+    let oldestSince = Infinity; // first track fetched AFTER this slide appeared
     for (let ti = 0; ti < trackSigs.length; ti++) {
       if (matchesTrack(i, k, trackSigs[ti])) {
         trackMatched[ti] = true;
         score++;
         newest = Math.max(newest, tracks[ti].at);
         oldest = Math.min(oldest, tracks[ti].at);
+        if (tracks[ti].at >= slideAt) oldestSince = Math.min(oldestSince, tracks[ti].at);
       }
     }
     if (score > 0) {
       fetchScore.set(g, Math.max(score, fetchScore.get(g) ?? 0));
       fetchNewest.set(g, Math.max(newest, fetchNewest.get(g) ?? 0));
       fetchOldest.set(g, Math.min(oldest, fetchOldest.get(g) ?? Infinity));
+      if (oldestSince !== Infinity) {
+        fetchOldestSince.set(g, Math.min(oldestSince, fetchOldestSince.get(g) ?? Infinity));
+      }
     }
   }
   // Same-blob revisit rescue: a learned mark→group binding is dom-grade evidence
@@ -317,6 +327,16 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // decision must exclude them or back-to-back videos never hand over.
   const bestOther = prev != null ? ranked.find(([g]) => !prev.keys.has(g))?.[0] : undefined;
   const bestOtherFresh = bestOther != null && now - (fetchNewest.get(bestOther) ?? 0) < FETCH_FRESH_MS;
+  // Stale candidates (outside the streaming window) are ambiguous: the tray
+  // prefetches several cards in ONE burst, their timestamps are near-identical,
+  // and recency can't tell card N from N+1 — relaying to a guess would endorse
+  // (and durably coverBind-learn) the wrong video. A stale candidate is
+  // relayable only when it is the ONLY one; otherwise behave as pre-widening
+  // (no candidate → the honest-empty path), and let real evidence decide later.
+  const otherCount = prev != null ? ranked.filter(([g]) => !prev.keys.has(g)).length : 0;
+  const bestOtherRelayable =
+    bestOther != null &&
+    (now - (fetchNewest.get(bestOther) ?? 0) < STREAM_SEED_MS || otherCount === 1);
   // Did the candidate stream AFTER this slide appeared? Pre-slide-only evidence
   // (residue of two slides ago, mid-watch prefetch) must not win a relay off a
   // signature change, or rapid swiping lands on the n-2 video.
@@ -334,14 +354,17 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     const g = keys.values().next().value as string;
     for (const id of active) remember(coverBind, `${tid}:${id}`, g);
     // Bind the slide marker only when backed by POST-slide fetch evidence whose
-    // FIRST matching track sits near the slide start — so residue or a next-
+    // FIRST post-slide track sits near the slide start — so residue or a next-
     // neighbour prefetch (whose stream began well after slideAt) can't poison the
     // revisit memory, especially the DURABLE story-card key that persists across
-    // reopen. Learn under BOTH the full mark and the story-card portion.
+    // reopen. Anchored on fetchOldestSince, not the global oldest: inside the
+    // wide match window the global oldest is dragged back by the group's own
+    // pre-slide prefetch, which would silently block learning for exactly the
+    // stories that need the revisit rescue most. Learn under BOTH the full mark
+    // and the story-card portion.
     if (
       ref.mark != null &&
-      (fetchNewest.get(g) ?? 0) >= slideAt &&
-      Math.abs((fetchOldest.get(g) ?? Infinity) - slideAt) < FETCH_FRESH_MS
+      (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS
     ) {
       remember(markBind, `${tid}:${ref.mark}`, g);
       const sp = markStoryPortion(ref.mark);
@@ -377,6 +400,7 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       if (now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS) endorse(new Set([seed]));
     }
   } else if (
+    bestOtherRelayable &&
     bestOther != null &&
     !captureWait &&
     ((activeSig !== prev.seenActive && (bestOtherSinceSlide || now - slideAt > 1500)) ||
@@ -394,7 +418,7 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   } else if (
     activeSig !== prev.seenActive &&
     ref?.hasVideo === true &&
-    bestOther == null &&
+    !bestOtherRelayable &&
     !captureWait &&
     now - slideAt > 1500
   ) {
