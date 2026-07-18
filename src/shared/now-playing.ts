@@ -42,6 +42,13 @@ const FETCH_FRESH_MS = 12 * 1000;
 // slide — the strongest relay trigger for back-to-back videos whose covers we
 // can't match to captures.
 const lastLive = new Map<number, { keys: Set<string>; at: number; seenActive: string }>();
+// Slide signatures under which honest-empty REFUSED to guess. The refusal must
+// survive the deletion of lastLive it performs: one tick later prev is null and
+// the SEED branch runs — without this memory it would endorse, on the very same
+// slide, the same guess-grade candidate the relay just declined (its 30s
+// freshness gate is looser than the anchor). Cleared by any endorsement and on
+// tab teardown.
+const emptiedUnder = new Map<number, string>();
 // Learned on-screen evidence: cover asset id → video group, and group → cover URL.
 // Fetch evidence only exists the FIRST time a video streams; returning to an
 // already-buffered video fetches nothing, so these learned bindings are the only
@@ -82,6 +89,7 @@ export function getGroupCover(tid: number, groupKey: string): string | undefined
 /** Forget a closed tab's last-live memory. */
 export function forgetLastLive(tid: number): void {
   lastLive.delete(tid);
+  emptiedUnder.delete(tid);
 }
 
 // --- Persist the learned bindings so a reopened panel re-matches ---
@@ -147,6 +155,7 @@ export function purgeTabBindings(tid: number): void {
     for (const k of [...m.keys()]) if (k.startsWith(prefix)) m.delete(k);
   }
   lastLive.delete(tid);
+  emptiedUnder.delete(tid);
   if (pendingTid === tid) cancelBindFlush();
 }
 
@@ -339,8 +348,24 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // Best RELAYABLE candidate OUTSIDE the remembered set — the remembered
   // video's own residual tracks often outscore a just-started next video, so
   // the relay decision must exclude them or back-to-back videos never hand
-  // over.
-  const bestOther = prev != null ? ranked.find(([g]) => !prev.keys.has(g) && relayable(g))?.[0] : undefined;
+  // over. Among several ANCHORED candidates (the true video and a deep
+  // bucket's burst prefetch can anchor in the same transition instant),
+  // recency cannot tell them apart: prefer the stream that began CLOSEST to
+  // the slide start, then the more SUSTAINED one — genuine playback keeps
+  // appending tracks while a one-shot prefetch scores 1-2. Blind surfaces
+  // keep the recency order; no anchor exists there to compare.
+  let bestOther: string | undefined;
+  if (prev != null) {
+    const others = ranked.filter(([g]) => !prev.keys.has(g) && relayable(g));
+    if (!blind && others.length > 1) {
+      others.sort(
+        (a, b) =>
+          (fetchOldestSince.get(a[0]) ?? Infinity) - (fetchOldestSince.get(b[0]) ?? Infinity) ||
+          b[1] - a[1],
+      );
+    }
+    bestOther = others[0]?.[0];
+  }
   const prevNewest = prev != null ? Math.max(0, ...[...prev.keys].map((k) => fetchNewest.get(k) ?? 0)) : 0;
   const prevStreaming = prev != null && now - prevNewest < FETCH_FRESH_MS;
 
@@ -348,10 +373,20 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // on a video slide, LEARN the on-screen evidence: bind the centered cover ids
   // to the group (so returning to this already-buffered video re-matches without
   // any network traffic) and keep its cover URL as a display thumbnail.
-  const endorse = (keys: Set<string>): void => {
+  //
+  // Learning is gated by PROVENANCE: bindings are durable (persisted, and a
+  // coverBind hit counts as dom-grade evidence on every future visit), so they
+  // may only come from evidence that identifies THIS slide — a dom-grade
+  // endorsement, or a fetch endorsement whose stream anchors to the slide
+  // start. A guessed endorsement may paint once, but must never teach: a wrong
+  // coverBind row misidentifies this exact slide until the FIFO evicts it.
+  const endorse = (keys: Set<string>, domGrade = false): void => {
     lastLive.set(tid, { keys, at: now, seenActive: activeSig });
+    emptiedUnder.delete(tid);
     if (keys.size !== 1 || ref?.hasVideo !== true) return;
     const g = keys.values().next().value as string;
+    const anchored = (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS;
+    if (!domGrade && !anchored) return;
     for (const id of active) remember(coverBind, `${tid}:${id}`, g);
     // Bind the slide marker only when backed by POST-slide fetch evidence whose
     // FIRST post-slide track sits near the slide start — so residue or a next-
@@ -362,10 +397,7 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // pre-slide prefetch, which would silently block learning for exactly the
     // stories that need the revisit rescue most. Learn under BOTH the full mark
     // and the story-card portion.
-    if (
-      ref.mark != null &&
-      (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS
-    ) {
+    if (ref.mark != null && anchored) {
       remember(markBind, `${tid}:${ref.mark}`, g);
       const sp = markStoryPortion(ref.mark);
       if (sp != null) remember(markBind, `${tid}:${sp}`, g);
@@ -376,7 +408,7 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   };
 
   if (domLive.size > 0) {
-    endorse(domLive);
+    endorse(domLive, true);
   } else if (prev == null) {
     if (bestFetch != null) {
       // Anchor the seed to the slide start: the watched video begins streaming
@@ -396,8 +428,19 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       // The wide match window exists for RELAYS (a prefetched story must stay
       // matchable when its slide finally arrives); claiming an EMPTY slot is
       // held to actively-streaming evidence so a cold panel open can't
-      // resurrect an old prefetched neighbour as "playing now".
-      if (now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS) endorse(new Set([seed]));
+      // resurrect an old prefetched neighbour as "playing now". And if the
+      // slot is empty because honest-empty REFUSED to guess on this very
+      // slide, streaming-fresh is not enough — only an anchored candidate may
+      // reseed here, or a deep bucket's 30s-fresh burst wins one tick later
+      // exactly what the relay just declined it. (A cold open has no refusal
+      // recorded, and its stale slideAt could never anchor anything.)
+      const refusedHere = emptiedUnder.get(tid) === activeSig;
+      if (
+        now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS &&
+        (!refusedHere || relayable(seed))
+      ) {
+        endorse(new Set([seed]));
+      }
     }
   } else if (
     bestOther != null &&
@@ -427,9 +470,11 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // deep-prefetch candidates in the window): drop the stale memory after a
     // 1.5s grace for the real video's first track — an honest empty beats both
     // pinning the previous video for 5 minutes and painting a guessed
-    // neighbour. (A same-blob revisit never reaches here: markBind rescues it
-    // as domLive.)
+    // neighbour. Remember the refusal under this signature so the seed branch
+    // can't re-guess on the same slide once prev is gone. (A same-blob revisit
+    // never reaches here: markBind rescues it as domLive.)
     lastLive.delete(tid);
+    emptiedUnder.set(tid, activeSig);
   } else if (prevStreaming) {
     // Refresh only on FRESH streaming — window residue must not keep a finished
     // video pinned past the handover to the next one.
