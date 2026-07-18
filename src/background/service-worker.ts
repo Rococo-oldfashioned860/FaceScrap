@@ -9,7 +9,7 @@
 // persist immediately. Never keep capture state in module-scope variables.
 
 import { withTimeout } from '../shared/async';
-import { addMedia, clearTab, setCaps, setPlaying, setRecent } from '../shared/storage';
+import { addMedia, clearTab, purgeTab, setCaps, setPlaying, setRecent } from '../shared/storage';
 import { classifyNetworkRequest, isFbcdn, sanitizeIncomingItems, widenDashUrl, type MediaSource } from '../shared/media';
 import type { MuxMsg, MuxResponse, RevokeMsg, RuntimeMessage } from '../shared/messages';
 import { hasOffscreen, hasSidePanel } from '../shared/capabilities';
@@ -253,10 +253,11 @@ async function setBadge(tabId: number, n: number): Promise<void> {
   await chrome.action.setBadgeText({ tabId, text: n > 0 ? String(Math.min(n, 999)) : '' });
 }
 
-// 5. Clean up when a tab closes.
+// 5. Clean up when a tab closes — the one path that also drops the download
+//    history (navigation and the Clear button keep it; see purgeTab).
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabSurface.delete(tabId);
-  void clearTab(tabId);
+  void purgeTab(tabId);
 });
 
 // 6. Clear per-tab state once a tab has left facebook.com. `changeInfo.url` is

@@ -18,7 +18,7 @@ import {
 } from '../shared/media';
 import { getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n';
 import { withTimeout } from '../shared/async';
-import { addSaved, getCaps, getMedia, getSaved } from '../shared/storage';
+import { addSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../shared/settings';
 import type { ClearTabMsg, DownloadDashMsg, DownloadDashResponse } from '../shared/messages';
 import {
@@ -83,6 +83,11 @@ let bulkTab: number | undefined;
 // button in the grid, so this only puts an honest tag on the card; the Now Playing
 // button turns into "Retry".
 const lastFailed = new Set<string>();
+// Tabs closed while this panel document lived. A download or bulk queue that
+// snapshotted its tid keeps draining after the tab closes, and writing its
+// receipts would recreate the saved_ key purgeTab just removed — the serial
+// chain orders enqueued tasks, not future ones. Consulted before every addSaved.
+const deadTabs = new Set<number>();
 // Chosen quality per video (videoGroupKey → item id), so a re-render (every
 // storage change + the 2s tick) doesn't reset the Now Playing selector to the best.
 const qualityChoice = new Map<string, string>();
@@ -356,21 +361,39 @@ async function startDirectDownload(item: MediaItem): Promise<boolean> {
   }
 }
 
+/** Freeze a download receipt at click time: the download can await up to 120s,
+ *  during which a tab switch or navigation wipe may rebuild `cardsById` with
+ *  other content — the receipt must describe what was actually saved. */
+function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
+  const card = cardsById.get(cardId);
+  return {
+    id: cardId,
+    kind: item.kind,
+    source: item.source,
+    savedAt: Date.now(),
+    thumbUrl: card?.thumbUrl ?? (item.kind === 'image' ? item.url : item.thumbUrl),
+    resLabel: item.kind === 'video' ? resolutionOf(item).label : undefined,
+    durationSec: card?.durationSec ?? item.durationSec,
+  };
+}
+
 /** Download one item (a card's or Now Playing's chosen target). Sequential with
  *  the bulk run — both drive the single offscreen document — so it refuses to
  *  start while a bulk run is going, and the tray refuses to start while a single
  *  is going. Busy + failed state are keyed by card id and survive re-render. */
 async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   if (bulkRunning || cardBusy.has(cardId)) return;
-  // Snapshot the tab: the merge can await up to 120s and onActivated flips module
-  // `tabId` on a tab switch — the save belongs to the tab that made it.
+  // Snapshot the tab AND the receipt: the merge can await up to 120s, and
+  // onActivated flips module `tabId` on a tab switch — the save belongs to the
+  // tab and the card that were clicked.
   const tid = tabId;
+  const receipt = savedEntryFor(cardId, item);
   cardBusy.add(cardId);
   lastFailed.delete(cardId);
   lastRenderSig = ''; // busy state feeds the card + the Now Playing button
   await render();
   const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
-  if (ok && tid !== undefined) await addSaved(tid, [cardId]);
+  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, [receipt]);
   // Panel-local bookkeeping belongs to the tab that started the download. If the
   // panel followed a tab switch during the (up to 120s) merge, onActivated has
   // already cleared cardBusy/lastFailed for the incoming tab — this run must not
@@ -414,7 +437,21 @@ interface Card {
   mayLackAudio: boolean;
   /** This card is what the tab is playing right now. */
   live: boolean;
+  /** Hidden from the LIBRARY grid by a declutter setting (videosOnly,
+   *  minResolution) or the cover dedupe. A flag, not a drop: the Saved history
+   *  and the cart must keep seeing the card. */
+  libraryHidden?: boolean;
+  /** A Saved receipt with no live capture behind it (media_ was wiped). Renders
+   *  with honest disabled controls; revives when a replay re-captures the same
+   *  content-derived id. */
+  stale?: boolean;
 }
+
+/** Card-id scheme — a persisted format: saved_ receipts store these ids, so it
+ *  changes only with a migration (see SavedEntry in storage.ts). Prefixed
+ *  because group keys and item ids are namespaces that must never collide. */
+const videoCardId = (gkey: string): string => `v:${gkey}`;
+const itemCardId = (itemId: string): string => `i:${itemId}`;
 
 /** Will the download have sound? audioUrl → gets remuxed; non-`dash` → muxed
  *  progressive; a `dash` track without audioUrl is video-only (muted). */
@@ -482,7 +519,7 @@ function buildVideoCard(group: MediaItem[], tid: number | undefined, playing: Se
   const { options, gkey, thumbUrl, durationSec } = videoOptions(group, tid);
   const target = defaultTarget(options);
   return {
-    id: `v:${gkey}`,
+    id: videoCardId(gkey),
     at: Math.max(...group.map((i) => i.addedAt)),
     kind: 'video',
     source: group[0].source,
@@ -500,7 +537,7 @@ function buildVideoCard(group: MediaItem[], tid: number | undefined, playing: Se
  *  splits them off before reaching here. */
 function buildItemCard(item: MediaItem, playing: Set<string>): Card {
   return {
-    id: `i:${item.id}`,
+    id: itemCardId(item.id),
     at: item.addedAt,
     kind: item.kind,
     source: item.source,
@@ -531,12 +568,14 @@ function cardMeta(card: Card): HTMLElement {
   }
   meta.textContent = base;
 
-  if (card.target == null) appendTag(meta, t('unavailable'));
+  if (card.target == null) appendTag(meta, t(card.stale ? 'tagSavedGone' : 'unavailable'));
   if (card.kind === 'audio') appendTag(meta, t('tagAudioTrack'));
   if (card.mayLackAudio) appendTag(meta, t('tagMayLackAudio'));
   // No retry button in the grid, so a dead download would otherwise vanish
   // silently. The pick stays put; the card's own Download button re-tries.
-  if (lastFailed.has(card.id)) appendTag(meta, t('tagFailed'), 'tag-fail');
+  // Never on a stub: a receipt IS a success, and a failure recorded under the
+  // same content-derived id belongs to the live card, not the history row.
+  if (!card.stale && lastFailed.has(card.id)) appendTag(meta, t('tagFailed'), 'tag-fail');
   return meta;
 }
 
@@ -590,9 +629,12 @@ function renderCard(card: Card): HTMLElement {
       paintTray();
     });
   } else {
+    // Two distinct honest excuses: a stub is a downloaded receipt whose capture
+    // is gone (replaying revives it); anything else is undownloadable media.
     pick.disabled = true;
-    pick.title = t('titleBlobUnavailable');
-    pick.setAttribute('aria-label', t('titleBlobUnavailable'));
+    const why = t(card.stale ? 'titleSavedGone' : 'titleBlobUnavailable');
+    pick.title = why;
+    pick.setAttribute('aria-label', why);
   }
   thumb.appendChild(pick);
 
@@ -610,8 +652,8 @@ function renderCard(card: Card): HTMLElement {
     dl.addEventListener('click', () => void downloadCard(card.id, target));
   } else {
     dl.disabled = true;
-    dl.title = t('titleBlobUnavailable');
-    dl.setAttribute('aria-label', t('unavailable'));
+    dl.title = t(card.stale ? 'titleSavedGone' : 'titleBlobUnavailable');
+    dl.setAttribute('aria-label', t(card.stale ? 'tagSavedGone' : 'unavailable'));
   }
   thumb.appendChild(dl);
 
@@ -654,7 +696,7 @@ function buildNowState(items: MediaItem[], tid: number | undefined, playing: Set
     const { options, gkey, thumbUrl, durationSec } = videoOptions(group, tid);
     if (options.length === 0) return null;
     return {
-      id: `v:${gkey}`,
+      id: videoCardId(gkey),
       kind: 'video',
       source: playingVideo.source,
       thumbUrl,
@@ -667,13 +709,13 @@ function buildNowState(items: MediaItem[], tid: number | undefined, playing: Set
   const img = playingItems.find((i) => i.kind === 'image' && isDownloadable(i));
   if (!img) return null;
   return {
-    id: `i:${img.id}`,
+    id: itemCardId(img.id),
     kind: 'image',
     source: img.source,
     thumbUrl: img.url,
     pieces,
     options: [img],
-    gkey: `i:${img.id}`,
+    gkey: itemCardId(img.id),
   };
 }
 
@@ -821,10 +863,13 @@ async function runBulk(): Promise<void> {
   // flips module `tabId` on a tab switch — these picks, and the saved marks they
   // earn, belong to the tab that made them.
   const tid = tabId;
-  const queue: { id: string; item: MediaItem }[] = [];
+  // Receipts freeze at queue-build time too: by the time an item's turn comes,
+  // a navigation wipe may have rebuilt cardsById empty and the receipt would
+  // lose its thumb/duration.
+  const queue: { id: string; item: MediaItem; receipt: SavedEntry }[] = [];
   for (const id of selected) {
     const target = cardsById.get(id)?.target;
-    if (target != null) queue.push({ id, item: target });
+    if (target != null) queue.push({ id, item: target, receipt: savedEntryFor(id, target) });
   }
   if (queue.length === 0) return;
 
@@ -835,7 +880,7 @@ async function runBulk(): Promise<void> {
   const done: string[] = [];
   const failed: string[] = [];
   try {
-    for (const [i, { id, item }] of queue.entries()) {
+    for (const [i, { id, item, receipt }] of queue.entries()) {
       // Only in the tab this run belongs to: elsewhere the panel shows a different
       // cart, and #bulk-dl is one shared node — this label would report our queue
       // over their picks.
@@ -849,7 +894,7 @@ async function runBulk(): Promise<void> {
       // Persist each save as it lands, not as one batch at the end: the download
       // belongs to the SW and the browser, so a panel closed mid-queue leaves the
       // files on disk — a `done` bank still in memory would die with the document.
-      if (ok && tid !== undefined) await addSaved(tid, [id]);
+      if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, [receipt]);
     }
   } finally {
     bulkRunning = false;
@@ -900,22 +945,43 @@ async function render(): Promise<void> {
   }
 }
 
+/** A Saved card rendered from its receipt alone — the live capture is gone.
+ *  No target on purpose: receipts store no media URLs (fbcdn signatures rotate),
+ *  so there is nothing truthful for a download button to fetch. */
+function stubCard(e: SavedEntry): Card {
+  return {
+    id: e.id,
+    at: e.savedAt,
+    kind: e.kind,
+    source: e.source,
+    target: undefined,
+    thumbUrl: e.thumbUrl,
+    resLabel: e.resLabel,
+    durationSec: e.durationSec,
+    mayLackAudio: false,
+    live: false,
+    stale: true,
+  };
+}
+
 async function doRender(): Promise<void> {
   // Snapshot the tab once: doRender yields at every await, and onActivated can flip
   // module `tabId` mid-render — reading it twice would mix tab A's items with tab
   // B's now-playing. The queued rerun renders the newly-active tab.
   const tid = tabId;
-  const items = tid === undefined ? [] : await getMedia(tid);
+  const [items, savedEntries] = await Promise.all([
+    tid === undefined ? Promise.resolve<MediaItem[]>([]) : getMedia(tid),
+    // The ledger only feeds the Saved view (its cards and its signature term);
+    // the other views skip the read.
+    view !== 'saved' || tid === undefined ? Promise.resolve<SavedEntry[]>([]) : getSaved(tid),
+  ]);
   const playing =
     tid === undefined ? new Set<string>() : new Set((await selectPlaying(tid, items)).map((i) => i.id));
-  const savedIds = new Set(tid === undefined ? [] : await getSaved(tid));
 
   // Group videos by asset (one card per video); images/audio are one card each.
   const groups = new Map<string, MediaItem[]>();
   const others: MediaItem[] = [];
   for (const it of items) {
-    // "Videos only" is a view filter (images/audio hidden, never dropped from storage).
-    if (settings.videosOnly && it.kind !== 'video') continue;
     if (it.kind === 'video') {
       const key = videoGroupKey(it);
       (groups.get(key) ?? groups.set(key, []).get(key)!).push(it);
@@ -924,27 +990,39 @@ async function doRender(): Promise<void> {
     }
   }
 
+  // The declutter settings (videosOnly, minResolution) and the cover dedupe hide
+  // cards from the LIBRARY only — flags, not drops: the Saved history must keep
+  // rendering a receipt whose card a Library filter hides, and the cart relies
+  // on cardsById holding every real card.
   const cards: Card[] = [];
   for (const group of groups.values()) {
+    const card = buildVideoCard(group, tid, playing);
     if (settings.minResolution > 0) {
       const maxH = Math.max(0, ...group.map((i) => i.height ?? 0));
-      if (maxH > 0 && maxH < settings.minResolution) continue; // below the minimum-resolution filter
+      if (maxH > 0 && maxH < settings.minResolution) card.libraryHidden = true;
     }
-    cards.push(buildVideoCard(group, tid, playing));
+    cards.push(card);
   }
-  // Drop an image card that is only the cover of a shown video (avoid a dupe).
-  const shownCovers = new Set(cards.map((c) => c.thumbId).filter((x): x is string => x != null));
+  // An image card that is only the cover of a Library-VISIBLE video is a dupe
+  // there — but only there: its receipt still renders in Saved, and a cover
+  // whose video is itself hidden keeps its Library slot exactly as before.
+  const shownCovers = new Set(
+    cards.filter((c) => !c.libraryHidden).map((c) => c.thumbId).filter((x): x is string => x != null),
+  );
   for (const it of others) {
-    if (it.kind === 'image' && shownCovers.has(it.id)) continue;
-    cards.push(buildItemCard(it, playing));
+    const card = buildItemCard(it, playing);
+    if ((it.kind === 'image' && shownCovers.has(it.id)) || (settings.videosOnly && it.kind !== 'video')) {
+      card.libraryHidden = true;
+    }
+    cards.push(card);
   }
   cards.sort((a, b) => (settings.listOrder === 'oldest' ? a.at - b.at : b.at - a.at));
 
   cardsById.clear();
   for (const c of cards) cardsById.set(c.id, c);
-  // Forget picks whose card is gone: evicted from storage, hidden by a capture
-  // setting, or left behind by a tab switch. A filter is NOT a reason to drop one —
-  // the picks are a cart, and switching to "Videos" must not empty it.
+  // Forget picks whose card is gone: evicted from storage or left behind by a
+  // tab switch. Neither a sub-filter nor a declutter setting drops one — the
+  // picks are a cart, and hiding a card from the Library must not empty it.
   let pruned = false;
   for (const id of [...selected]) {
     if (cardsById.has(id)) continue;
@@ -952,10 +1030,20 @@ async function doRender(): Promise<void> {
     pruned = true;
   }
 
-  const now = buildNowState(items, tid, playing, cards.length);
-  // Library shows every card; Saved shows only what has been downloaded; both then
-  // narrow by the media sub-filter.
-  const base = view === 'saved' ? cards.filter((c) => savedIds.has(c.id)) : cards;
+  // Pieces = the cards of the post on screen right now (the live ones), not the
+  // whole tab's capture count. Now Playing state is only built for its own view.
+  const now =
+    view === 'now' ? buildNowState(items, tid, playing, cards.filter((c) => c.live).length) : null;
+  // Library hides the declutter-flagged cards. Saved renders the receipt ledger
+  // in download order: the live card when the capture still exists (a real
+  // re-download with fresh URLs), a stub frozen from the receipt when it does
+  // not — the stub revives by itself once a replay re-captures the same
+  // content-derived id. Both views then narrow by the media sub-filter.
+  const orderedSaved = settings.listOrder === 'oldest' ? savedEntries : [...savedEntries].reverse();
+  const base =
+    view === 'saved'
+      ? orderedSaved.map((e) => cardsById.get(e.id) ?? stubCard(e))
+      : cards.filter((c) => !c.libraryHidden);
   const gridCards =
     view === 'now' ? [] : base.filter((c) => mediaFilter === 'all' || c.kind === mediaFilter);
 
@@ -983,7 +1071,7 @@ async function doRender(): Promise<void> {
       settings.defaultQuality,
     ]),
     view === 'now' ? nowSig : '',
-    view === 'saved' ? [...savedIds].sort().join(',') : '',
+    view === 'saved' ? savedEntries.map((e) => e.id).join(',') : '',
     view === 'now'
       ? ''
       : gridCards
@@ -993,7 +1081,7 @@ async function doRender(): Promise<void> {
                 c.target != null ? 1 : 0
               }|${c.mayLackAudio ? 1 : 0}|${c.live ? 1 : 0}|${lastFailed.has(c.id) ? 1 : 0}|${
                 cardBusy.has(c.id) ? 1 : 0
-              }`,
+              }|${c.stale ? 1 : 0}`, // stale bit: a stub→live revival must repaint
           )
           .join('\n'),
   ].join('\n');
@@ -1145,9 +1233,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Forget the last-live video of tabs that close (panel-local memory).
+  // Forget the last-live video of tabs that close (panel-local memory), and
+  // remember the tab is dead so a draining download can't resurrect its saved_.
   chrome.tabs.onRemoved.addListener((id) => {
     forgetLastLive(id);
+    deadTabs.add(id);
   });
 
   // Keep language and settings in sync if another view (a second panel in another

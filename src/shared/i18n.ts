@@ -64,7 +64,9 @@ export type MsgKey =
   | 'tagMayLackAudio'
   | 'tagAudioTrack'
   | 'tagFailed'
+  | 'tagSavedGone'
   | 'titleBlobUnavailable'
+  | 'titleSavedGone'
   | 'bannerDegraded'
   // Settings.
   | 'settings'
@@ -162,7 +164,9 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     tagMayLackAudio: 'may lack audio',
     tagAudioTrack: 'audio track',
     tagFailed: 'failed',
+    tagSavedGone: 'not on this page anymore',
     titleBlobUnavailable: 'This media is an MSE blob: and can\'t be saved.',
+    titleSavedGone: 'Already downloaded. The capture is gone — replay it on this tab to re-enable downloading.',
     bannerDegraded:
       'This browser can\'t merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.',
     settings: 'Settings',
@@ -258,7 +262,9 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     tagMayLackAudio: 'puede venir sin audio',
     tagAudioTrack: 'pista de audio',
     tagFailed: 'falló',
+    tagSavedGone: 'ya no está en esta página',
     titleBlobUnavailable: 'Este medio es un blob: de MSE y no puede guardarse.',
+    titleSavedGone: 'Ya descargado. La captura ya no está: reprodúcelo en esta pestaña para reactivar la descarga.',
     bannerDegraded:
       'Este navegador no puede unir audio y video: los HD se descargan solo con imagen. Usa Chrome o Edge para incluir el audio.',
     settings: 'Configuración',

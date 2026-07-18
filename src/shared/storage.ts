@@ -4,7 +4,15 @@
 // chain each) so bursty fbcdn read-modify-write cycles can't lose updates, while
 // unrelated keys never wait on each other.
 
-import { mergeMedia, type MediaItem } from './media';
+import {
+  isFbcdn,
+  MEDIA_KINDS,
+  MEDIA_SOURCES,
+  mergeMedia,
+  type MediaItem,
+  type MediaKind,
+  type MediaSource,
+} from './media';
 import { DEFAULT_SETTINGS, loadSettings } from './settings';
 
 const keyFor = (tabId: number): string => `media_${tabId}`;
@@ -189,33 +197,131 @@ export async function getBind(tabId: number): Promise<BindState | null> {
   return raw;
 }
 
-// --- Ids already downloaded from this tab (the panel's "Saved" filter) ---
-// Ids only, never items: the media list already holds those, and this must stay
-// cheap enough to keep for a whole session. Persisted (not panel-local) so the
-// filter still tells the truth after the panel is closed and reopened.
+// --- Download receipts for this tab (the panel's "Saved" history) ---
+// One SavedEntry per completed download: enough to RENDER a Saved card after
+// media_<tabId> is wiped (Clear, navigation, eviction), never enough to
+// re-download — media URLs carry rotating fbcdn signatures, so a stored one
+// would be a download button that lies. The receipt's `id` is the panel card id
+// (`v:${groupKey}` / `i:${itemId}`): content-derived, so when the user replays
+// the content the rebuilt live card carries the same id and the receipt
+// re-links to it automatically. That id format is a persisted contract now —
+// change it only with a migration.
+// Per-tab keys, not one global ledger: a serialQueue orders writes only within
+// its own JS context, so a shared key written from two panel windows would race
+// read-modify-write cycles.
+
+export interface SavedEntry {
+  id: string;
+  kind: MediaKind;
+  source: MediaSource;
+  /** Download time — the Saved view's sort key. Frozen on the first save. */
+  savedAt: number;
+  /** fbcdn poster/self URL. Its signature expires; the card's <img> error path
+   *  degrades it to the kind icon. Shed first under quota pressure. */
+  thumbUrl?: string;
+  resLabel?: string;
+  durationSec?: number;
+}
 
 const savedKey = (tabId: number): string => `saved_${tabId}`;
-// Insertion-ordered, so the cap below evicts the oldest saves first.
+// Insertion-ordered, so the cap below evicts the oldest receipts first.
 const SAVED_MAX = 2000;
+// Soft byte budget for one tab's serialized ledger (Chrome bills key length +
+// JSON length against the ~10MB shared area). Past it, thumbnails are shed
+// oldest-first: the history row is the promise, the thumb is decoration whose
+// signature has usually expired by then anyway.
+const SAVED_BYTE_BUDGET = 262_144;
+const SAVED_THUMB_MAX = 1024; // fbcdn image URLs run 300–500 chars; drop outliers
+const SAVED_LABEL_MAX = 16;
 const enqueueSaved = serialQueue();
 
-/** Mark ids as downloaded. Idempotent: re-saving an id keeps its first position. */
-export function addSaved(tabId: number, ids: string[]): Promise<void> {
+function isSavedEntry(x: unknown): x is SavedEntry {
+  if (x == null || typeof x !== 'object') return false;
+  const e = x as Record<string, unknown>;
+  return (
+    typeof e.id === 'string' &&
+    e.id.length > 0 &&
+    typeof e.kind === 'string' &&
+    MEDIA_KINDS.has(e.kind) &&
+    typeof e.source === 'string' &&
+    MEDIA_SOURCES.has(e.source) &&
+    typeof e.savedAt === 'number' &&
+    Number.isFinite(e.savedAt)
+  );
+}
+
+/** Clamp one receipt to its stored bounds — applied to every entry that enters
+ *  the ledger, whether new or refreshing an existing row. */
+function sanitizeEntry(e: SavedEntry): SavedEntry {
+  const out: SavedEntry = {
+    id: e.id.slice(0, 256), // matches the media.ts id bound
+    kind: e.kind,
+    source: e.source,
+    savedAt: e.savedAt,
+  };
+  if (e.thumbUrl != null && e.thumbUrl.length <= SAVED_THUMB_MAX && isFbcdn(e.thumbUrl)) out.thumbUrl = e.thumbUrl;
+  if (e.resLabel != null) out.resLabel = e.resLabel.slice(0, SAVED_LABEL_MAX);
+  if (e.durationSec != null && Number.isFinite(e.durationSec)) out.durationSec = e.durationSec;
+  return out;
+}
+
+async function readSaved(key: string): Promise<SavedEntry[]> {
+  const raw = await readKey<unknown>(key, []);
+  return Array.isArray(raw) ? raw.filter(isSavedEntry).map(sanitizeEntry) : [];
+}
+
+/** Enforce the byte budget by stripping thumbnails oldest-first — never rows.
+ *  The serialized length is computed once and decremented by an estimate of each
+ *  shed thumb's JSON footprint (field, quotes, separator) instead of
+ *  re-stringifying per iteration; the budget is soft, the estimate is enough. */
+function shedThumbs(key: string, entries: SavedEntry[]): void {
+  let bytes = key.length + JSON.stringify(entries).length;
+  for (const e of entries) {
+    if (bytes <= SAVED_BYTE_BUDGET) return;
+    if (e.thumbUrl == null) continue;
+    bytes -= `"thumbUrl":${JSON.stringify(e.thumbUrl)},`.length;
+    delete e.thumbUrl;
+  }
+}
+
+/** Record download receipts. Idempotent: re-saving an id keeps its first
+ *  position and original savedAt, refreshing only the display fields (a
+ *  re-download carries a newer-signed thumb that will live longer). */
+export function addSaved(tabId: number, entries: SavedEntry[]): Promise<void> {
   return enqueueSaved(
     async () => {
       const key = savedKey(tabId);
-      const cur = await readKey<string[]>(key, []);
-      const next = [...new Set([...cur, ...ids])];
-      if (next.length > SAVED_MAX) next.splice(0, next.length - SAVED_MAX);
-      await chrome.storage.session.set({ [key]: next });
+      const cur = await readSaved(key);
+      const byId = new Map(cur.map((e) => [e.id, e]));
+      for (const raw of entries) {
+        const e = sanitizeEntry(raw);
+        const kept = byId.get(e.id);
+        if (kept) {
+          Object.assign(kept, e, { savedAt: kept.savedAt });
+        } else {
+          byId.set(e.id, e);
+          cur.push(e);
+        }
+      }
+      if (cur.length > SAVED_MAX) cur.splice(0, cur.length - SAVED_MAX);
+      shedThumbs(key, cur);
+      try {
+        await chrome.storage.session.set({ [key]: cur });
+      } catch {
+        // The byte budget is an estimate against a SHARED quota another tab may
+        // have filled: as a last resort drop the oldest half of the history and
+        // retry once (the same pattern addMedia uses); a second failure hits the
+        // queue's onError.
+        cur.splice(0, Math.ceil(cur.length / 2));
+        await chrome.storage.session.set({ [key]: cur });
+      }
     },
     (err) => console.error('[FaceScrap] saved write failed', err),
   );
 }
 
-export async function getSaved(tabId: number): Promise<string[]> {
-  const raw = await readKey<unknown>(savedKey(tabId), []);
-  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+export async function getSaved(tabId: number): Promise<SavedEntry[]> {
+  return readSaved(savedKey(tabId));
 }
 
 /** Remove the per-tab CAPTURE state (media list + now-playing + recent + bindings).
@@ -226,8 +332,9 @@ export async function getSaved(tabId: number): Promise<string[]> {
  *
  *  saved_ is deliberately NOT touched: it is the tab's download history, which
  *  outlives both a page navigation and the "Clear captured list" button (whose
- *  UI promises "Saved stays"). It is bounded by SAVED_MAX and, being in
- *  storage.session, cleared when the browser session ends. */
+ *  UI promises "Saved stays"). It is byte-budgeted and, being in
+ *  storage.session, cleared when the browser session ends. A CLOSED tab is the
+ *  one lifecycle where the history must go too — that path is purgeTab. */
 export function clearTab(tabId: number): Promise<void> {
   const fail = (err: unknown): void => console.error('[FaceScrap] storage clear failed', err);
   return Promise.all([
@@ -235,6 +342,22 @@ export function clearTab(tabId: number): Promise<void> {
     enqueuePlaying(() => chrome.storage.session.remove(playingKey(tabId)), fail),
     enqueueRecent(() => chrome.storage.session.remove(recentKey(tabId)), fail),
     enqueueBind(() => chrome.storage.session.remove(bindKey(tabId)), fail),
+  ]).then(() => undefined);
+}
+
+/** Full teardown for a CLOSED tab: the capture state AND the download history.
+ *  Chrome does not reuse tab ids within a session, so a dead tab can never
+ *  render its Saved view again — leaving saved_ would orphan the key in
+ *  storage.session until the browser exits. The removal rides the same
+ *  enqueueSaved chain as addSaved, so an already-enqueued receipt write can't
+ *  land after it. (A write enqueued AFTER this — a bulk queue still draining
+ *  when its tab closed — would recreate the key; the panel guards that with a
+ *  dead-tab check before every addSaved.) */
+export function purgeTab(tabId: number): Promise<void> {
+  const fail = (err: unknown): void => console.error('[FaceScrap] storage clear failed', err);
+  return Promise.all([
+    clearTab(tabId),
+    enqueueSaved(() => chrome.storage.session.remove(savedKey(tabId)), fail),
   ]).then(() => undefined);
 }
 

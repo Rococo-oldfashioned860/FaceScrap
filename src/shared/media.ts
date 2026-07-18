@@ -175,8 +175,10 @@ export function makeItem(
   return { id: mediaId(url), url, kind, source, origin, dash, addedAt: now };
 }
 
-const KINDS: ReadonlySet<string> = new Set(['video', 'image', 'audio']);
-const SOURCES: ReadonlySet<string> = new Set(['reel', 'story', 'highlight', 'video', 'page']);
+// Exported: storage.ts validates persisted SavedEntry shapes against the same
+// enum authorities this sanitizer uses.
+export const MEDIA_KINDS: ReadonlySet<string> = new Set(['video', 'image', 'audio']);
+export const MEDIA_SOURCES: ReadonlySet<string> = new Set(['reel', 'story', 'highlight', 'video', 'page']);
 const ORIGINS: ReadonlySet<string> = new Set(['network', 'graphql', 'dom']);
 
 /**
@@ -206,8 +208,8 @@ export function sanitizeIncomingItems(raw: unknown): MediaItem[] {
     // fbcdn-hosted UI chrome (rsrc.php sprites/emoji) rides along in GraphQL
     // bodies as image URIs — it is never downloadable media.
     if (isStaticFbAsset(it.url)) continue;
-    if (typeof it.kind !== 'string' || !KINDS.has(it.kind)) continue;
-    if (typeof it.source !== 'string' || !SOURCES.has(it.source)) continue;
+    if (typeof it.kind !== 'string' || !MEDIA_KINDS.has(it.kind)) continue;
+    if (typeof it.source !== 'string' || !MEDIA_SOURCES.has(it.source)) continue;
     if (typeof it.origin !== 'string' || !ORIGINS.has(it.origin)) continue;
     // Optional URL-bearing fields, if present, must also be fbcdn (and bounded).
     if (
