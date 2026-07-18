@@ -422,8 +422,12 @@ async function runDownloadDash(videoUrl: string, audioUrl: string, filename: str
       // failed, and a prior job's pending blob download has near-always
       // settled by now (blob→disk lands in well under a second). A rejected
       // sendMessage (offscreen already gone) takes this path too — the close
-      // is then a no-op.
-      chrome.offscreen.closeDocument().catch(() => {});
+      // is then a no-op. AWAITED before the rethrow: dashChain advances the
+      // moment this promise rejects (microtasks), while closeDocument is a
+      // cross-process round trip — an unawaited close lets the next job's
+      // ensureOffscreen see the dying document via getContexts, skip creation,
+      // and send its mux into it.
+      await chrome.offscreen.closeDocument().catch(() => {});
       throw e;
     }
     if (res?.ok !== true || !res.blobUrl) {

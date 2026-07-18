@@ -316,9 +316,12 @@ export function addSaved(tabId: number, entry: SavedEntry): Promise<void> {
         // retry once (the same pattern addMedia uses); a second failure hits the
         // queue's onError. Never the receipt being written: on a short ledger
         // the "oldest half" IS the new entry (or the row it refreshed), and
-        // dropping it would resolve as success while losing the row.
+        // dropping it would resolve as success while losing the row. Re-append
+        // the MERGED row (kept) when one existed — it carries the original
+        // savedAt this function's contract preserves; e still holds the
+        // caller's fresh timestamp.
         cur.splice(0, Math.ceil(cur.length / 2));
-        if (!cur.some((x) => x.id === e.id)) cur.push(e);
+        if (!cur.some((x) => x.id === e.id)) cur.push(kept ?? e);
         await chrome.storage.session.set({ [key]: cur });
       }
     },
