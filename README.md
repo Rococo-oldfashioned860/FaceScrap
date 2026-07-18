@@ -4,12 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Save the Facebook **reels, stories and highlights** you can watch, with one click.
-Chrome extension (Manifest V3, TypeScript) for **personal use** (load unpacked).
+Chrome extension (Manifest V3, TypeScript). **Self-hosted** — you build or unzip
+it and load it unpacked; it is not on the Chrome Web Store.
 
 > ⚠️ Only download content you have the rights to (your own, or with permission).
-> Meta's Terms prohibit automated downloading, so this is **not publishable** on
+> Meta's Terms prohibit automated downloading, so this **can't be published** on
 > the Chrome Web Store, and it depends on Facebook internals that change often
-> (expect roughly monthly maintenance).
+> (expect roughly monthly maintenance — watch the
+> [Releases](https://github.com/Hydza/FaceScrap/releases) page for updates).
+
+> **What it can access.** Loading FaceScrap grants it a content script on every
+> `facebook.com` page (`document_start`) and network access to `facebook.com` and
+> `fbcdn.net`. It reads only what those pages already load, stores captures in
+> per-tab session storage, and sends nothing to any server of its own. Review
+> [the source](src/) before installing — that is the point of self-hosting.
 
 <p align="center">
   <img src="docs/library.png" width="330" alt="FaceScrap Library view with captured videos and photos">

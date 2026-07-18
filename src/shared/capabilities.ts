@@ -10,11 +10,16 @@ export function hasSidePanel(): boolean {
   );
 }
 
-/** True when the Offscreen Documents API is usable (needed for DASH remux). */
+/** True when the Offscreen Documents API is usable (needed for DASH remux).
+ *  Also checks runtime.getContexts (Chrome 116): a fork may ship createDocument
+ *  (Chrome 109) without it, and ensureOffscreen() needs both — verifying only
+ *  createDocument would let ensureOffscreen throw on getContexts mid-download. */
 export function hasOffscreen(): boolean {
   return (
     typeof chrome !== 'undefined' &&
     'offscreen' in chrome &&
-    typeof chrome.offscreen?.createDocument === 'function'
+    typeof chrome.offscreen?.createDocument === 'function' &&
+    typeof chrome.runtime?.getContexts === 'function' &&
+    typeof chrome.runtime?.ContextType?.OFFSCREEN_DOCUMENT === 'string'
   );
 }

@@ -251,6 +251,12 @@ body::before {
   border-radius: var(--r-input);
 }
 .banner[hidden] { display: none; }
+/* Init-failure banner: stronger than the degraded notice — the panel isn't usable. */
+.banner-error {
+  margin: 12px;
+  background: rgba(251, 113, 133, 0.18);
+  font-weight: 500;
+}
 
 /* ── Views ──────────────────────────────────────────────────────────────────── */
 .view {
@@ -842,6 +848,12 @@ body::before {
   font: 400 11px/15px var(--font-body);
   letter-spacing: 0.2px;
   color: var(--text-muted);
+}
+.settings-version {
+  margin: 8px 0 0;
+  font: 400 11px/15px var(--font-mono);
+  color: var(--text-muted);
+  opacity: 0.7;
 }
 
 /* ── Toggle switch ──────────────────────────────────────────────────────────── */

@@ -4,6 +4,9 @@
   "description": "FaceScrap — download Facebook reels, stories and highlights (Chrome MV3, TypeScript).",
   "author": "Hydza",
   "private": true,
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "scripts": {
     "icons": "node scripts/generate-icons.mjs",

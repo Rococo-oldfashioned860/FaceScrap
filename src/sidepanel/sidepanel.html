@@ -49,6 +49,10 @@
         This browser can't merge audio and video: HD saves as video only. Use Chrome or Edge to include audio.
       </p>
 
+      <!-- Init-failure surface: shown (with a hardcoded message, since i18n may
+           not have loaded) when the panel can't start on this browser. -->
+      <p id="fatal" class="banner banner-error" hidden></p>
+
       <!-- ── Now Playing ─────────────────────────────────────────────────────── -->
       <section id="view-now" class="view">
         <div id="now-empty" class="empty">
@@ -265,6 +269,9 @@
         <p class="settings-rights" data-i18n="settingsRights">
           Only download content you have the rights to.
         </p>
+        <!-- Version is filled from the manifest at runtime; it gives an issue
+             report a concrete build to reference. -->
+        <p id="version" class="settings-version"></p>
       </div>
     </div>
 

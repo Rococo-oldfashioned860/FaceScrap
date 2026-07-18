@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in FaceScrap doesn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FaceScrap depends on Facebook internals that change often, and it runs on
+        many Chromium browsers. The details below let a fix start without a
+        back-and-forth. Check the [Releases](https://github.com/Hydza/FaceScrap/releases)
+        page first — the issue may already be fixed in a newer build.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: I played a reel on a story tray and nothing appeared in the panel…
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      description: e.g. Chrome 139, Edge 138, Brave 1.72, Opera, Vivaldi. Find it at the browser's About page.
+      placeholder: Chrome 139
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 / macOS 15 / Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FaceScrap version
+      description: The commit or release tag you built/downloaded (shown in the extension's Settings).
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happened
+      options:
+        - Story / highlight
+        - Reel
+        - Watch / video page
+        - Library or Saved view
+        - Download (progressive)
+        - Download (HD / merged)
+        - Settings
+        - Other
+    validations:
+      required: true

@@ -103,6 +103,9 @@ function offscreenBusyHere(): boolean {
 // grid, so this only puts an honest tag on the card; the Now Playing button
 // turns into "Retry".
 const lastFailed = new Set<string>();
+// The specific reason each failed card failed (expired URL, ffmpeg exit, timeout),
+// shown as a tooltip on its 'Failed' tag. Kept in step with lastFailed.
+const failReason = new Map<string, string>();
 
 /** Drop one tab's entries from the tab-namespaced state: its media was wiped
  *  (navigation reset), its list was cleared, or the tab closed — a later
@@ -113,6 +116,7 @@ function pruneTabState(tid: number): void {
   tabResetGen.set(tid, (tabResetGen.get(tid) ?? 0) + 1);
   const prefix = `${tid}:`;
   for (const k of [...lastFailed]) if (k.startsWith(prefix)) lastFailed.delete(k);
+  for (const k of [...failReason.keys()]) if (k.startsWith(prefix)) failReason.delete(k);
   for (const k of [...qualityChoice.keys()]) if (k.startsWith(prefix)) qualityChoice.delete(k);
 }
 // Bumped by pruneTabState. A download that settles AFTER its tab's state was
@@ -348,10 +352,11 @@ async function download(item: MediaItem): Promise<void> {
 
 /** Append " · tag" to a card's meta line. The separator is the caller's because
  *  the meta line owns its own punctuation. */
-function appendTag(meta: HTMLElement, text: string, cls?: string): void {
+function appendTag(meta: HTMLElement, text: string, cls?: string, title?: string): void {
   const s = document.createElement('span');
   s.className = cls ? `tag ${cls}` : 'tag';
   s.textContent = text;
+  if (title) s.title = title;
   meta.append(' · ', s);
 }
 
@@ -377,9 +382,9 @@ function stripAudio(): boolean {
 // gates every download entry point; stacked singles would outrun this bound,
 // tagging landed work failed and dropping its Saved receipt.
 
-async function startDashDownload(item: MediaItem): Promise<boolean> {
+async function startDashDownload(item: MediaItem): Promise<string | null> {
   const audioUrl = item.audioUrl;
-  if (audioUrl == null) return false; // callers gate on audioUrl; narrow it for the typed message
+  if (audioUrl == null) return 'No audio track.'; // callers gate on audioUrl; narrow it for the typed message
   try {
     const r: DownloadDashResponse | undefined = await withTimeout(
       chrome.runtime.sendMessage({
@@ -393,22 +398,23 @@ async function startDashDownload(item: MediaItem): Promise<boolean> {
       'The merge timed out.',
     );
     if (!r?.ok) throw new Error(r?.error || 'Merge failed.');
-    return true;
+    return null;
   } catch (e: unknown) {
     console.error('[FaceScrap]', e);
-    return false;
+    return (e as Error)?.message || 'Merge failed.';
   }
 }
 
 /** Direct download of a progressive/complete media URL (already has audio).
- *  Resolves either way, for the same reason as startDashDownload. */
-async function startDirectDownload(item: MediaItem): Promise<boolean> {
+ *  Resolves either way, for the same reason as startDashDownload. Returns null
+ *  on success, or the failure reason to surface on the card. */
+async function startDirectDownload(item: MediaItem): Promise<string | null> {
   try {
     await download(item);
-    return true;
+    return null;
   } catch (e) {
     console.error('[FaceScrap]', e);
-    return false;
+    return (e as Error)?.message || 'Download failed.';
   }
 }
 
@@ -435,10 +441,14 @@ function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
  *  closed mid-queue leaves the file on disk, and a receipt held in memory
  *  would die with the document. Skips the write for a closed tab (deadTabs):
  *  its saved_ key was just purged and must not resurrect. */
-async function downloadOne(tid: number | undefined, item: MediaItem, receipt: SavedEntry): Promise<boolean> {
-  const ok = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
-  if (ok && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
-  return ok;
+async function downloadOne(
+  tid: number | undefined,
+  item: MediaItem,
+  receipt: SavedEntry,
+): Promise<string | null> {
+  const err = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
+  if (err === null && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
+  return err;
 }
 
 /** Download one item (a card's or Now Playing's chosen target). Sequential with
@@ -458,8 +468,10 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   const gen = resetGen(tid);
   cardBusy.add(bkey);
   lastFailed.delete(bkey);
+  failReason.delete(bkey);
   await render(); // busy/failed are signature terms; render() sees them flip
-  const ok = await downloadOne(tid, item, receipt);
+  const err = await downloadOne(tid, item, receipt);
+  const ok = err === null;
   // Busy/failed are tab-namespaced, so this bookkeeping can never tag another
   // tab's card (the old clear-on-switch model instead dropped it, leaving a
   // phantom busy entry). The failure tag additionally checks the reset
@@ -468,7 +480,10 @@ async function downloadCard(cardId: string, item: MediaItem): Promise<void> {
   // removed. Only the repaint is scoped: a panel showing another tab repaints
   // just the globally-gated tray.
   cardBusy.delete(bkey);
-  if (!ok && resetGen(tid) === gen) lastFailed.add(bkey);
+  if (!ok && resetGen(tid) === gen) {
+    lastFailed.add(bkey);
+    if (err) failReason.set(bkey, err);
+  }
   if (tid === tabId) {
     await render();
   } else {
@@ -648,7 +663,8 @@ function cardMeta(card: Card): HTMLElement {
   // silently. The pick stays put; the card's own Download button re-tries.
   // Never on a stub: a receipt IS a success, and a failure recorded under the
   // same content-derived id belongs to the live card, not the history row.
-  if (!card.stale && lastFailed.has(tabKey(tabId, card.id))) appendTag(meta, t('tagFailed'), 'tag-fail');
+  if (!card.stale && lastFailed.has(tabKey(tabId, card.id)))
+    appendTag(meta, t('tagFailed'), 'tag-fail', failReason.get(tabKey(tabId, card.id)));
   return meta;
 }
 
@@ -992,7 +1008,7 @@ async function runBulk(): Promise<void> {
   bulkTab = tid;
   btn.disabled = true;
   const done: string[] = [];
-  const failed: string[] = [];
+  const failed: Array<{ id: string; err: string }> = [];
   try {
     for (const [i, { id, item, receipt }] of queue.entries()) {
       // Only in the tab this run belongs to: elsewhere the panel shows a different
@@ -1001,8 +1017,9 @@ async function runBulk(): Promise<void> {
       if (bulkTab === tabId && view !== 'now') {
         btn.textContent = fmt('bulkBusy', { i: i + 1, n: queue.length });
       }
-      const ok = await downloadOne(tid, item, receipt);
-      (ok ? done : failed).push(id);
+      const err = await downloadOne(tid, item, receipt);
+      if (err === null) done.push(id);
+      else failed.push({ id, err });
     }
   } finally {
     bulkRunning = false;
@@ -1018,9 +1035,13 @@ async function runBulk(): Promise<void> {
     for (const id of done) {
       if (tid === tabId) selected.delete(id);
       lastFailed.delete(tabKey(tid, id));
+      failReason.delete(tabKey(tid, id));
     }
     if (resetGen(tid) === gen) {
-      for (const id of failed) lastFailed.add(tabKey(tid, id));
+      for (const { id, err } of failed) {
+        lastFailed.add(tabKey(tid, id));
+        failReason.set(tabKey(tid, id), err);
+      }
     }
     if (tid === tabId) {
       lastRenderSig = ''; // the saved list and the failure tags feed the cards
@@ -1317,7 +1338,26 @@ function setupSelectAll(): void {
   });
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
+// A browser missing an API the panel needs (e.g. chrome.storage.session on a
+// stripped Chromium fork) would otherwise leave the panel blank with no clue.
+// Show a readable, hardcoded message instead — i18n may not have loaded yet.
+function showFatal(e: unknown): void {
+  const el = document.getElementById('fatal');
+  if (el) {
+    el.hidden = false;
+    const v = chrome.runtime?.getManifest?.().version;
+    el.textContent =
+      `FaceScrap couldn't start on this browser (${(e as Error)?.message ?? String(e)}). ` +
+      `It needs a Chromium browser with the storage, tabs and side-panel APIs — try Chrome or Edge.` +
+      (v ? ` [v${v}]` : '');
+  }
+  console.error('[FaceScrap] init failed', e);
+}
+
+document.addEventListener('DOMContentLoaded', () => void init());
+
+async function init(): Promise<void> {
+ try {
   await resolveActiveTab();
   // Restore learned bindings before the first render so a reopened panel can
   // re-match the current video without waiting for new fbcdn traffic.
@@ -1333,6 +1373,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupLangToggle();
   setupSettings();
   localize();
+
+  const versionEl = document.getElementById('version');
+  if (versionEl) versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
 
   byId('bulk-dl').addEventListener('click', () => void runBulk());
 
@@ -1470,4 +1513,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('pagehide', flushBindingsNow);
 
   await render();
-});
+ } catch (e) {
+  showFatal(e);
+ }
+}
