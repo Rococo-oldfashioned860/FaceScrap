@@ -96,11 +96,13 @@
 
 html, body { height: 100%; }
 
-/* The panel doubles as a toolbar popup, which sizes to content — so 400px is the
-   floor the popup opens at. Narrower, the grid still works; the cards just shrink. */
+/* The panel doubles as a toolbar popup, which sizes to content — this is the
+   floor the popup opens at. It must not exceed Chrome's own side-panel minimum
+   (~320px): a larger floor pins the layout wider than the viewport and every
+   view scrolls horizontally for users who drag the panel narrow. */
 body {
   margin: 0;
-  min-width: 400px;
+  min-width: 320px;
   font-family: var(--font-body);
   color: var(--text-primary);
   /* A vertical light-to-dark fall plus a cool light from the top and a warm one
