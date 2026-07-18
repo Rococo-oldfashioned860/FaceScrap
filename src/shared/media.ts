@@ -68,6 +68,24 @@ export function isStaticFbAsset(url: string): boolean {
   }
 }
 
+/**
+ * True for profile-picture crop renditions: the fbcdn path type token with the
+ * `-1` suffix (`/t39.30808-1/`, `/t1.6435-1/`, …). Facebook serves every
+ * avatar and profile-photo crop under it — including the viewer's own face on
+ * the stories tray's Create-story tile — while post/story media use other
+ * suffixes (`-6` photos, `-10` video thumbs, `-15` …). Chrome, not content,
+ * for the incidental GraphQL image harvest; the deliberate on-screen DOM scan
+ * stays permissive so a full-size profile photo opened in the viewer can still
+ * be captured.
+ */
+export function isProfilePicCrop(url: string): boolean {
+  try {
+    return /\/t[\d.]+-1\//.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** Widen a DASH byte-range segment URL into the full-track URL. */
 export function widenDashUrl(url: string): string {
   try {

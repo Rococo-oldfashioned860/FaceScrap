@@ -4,7 +4,16 @@
 // hardcoded doc_id (Meta rotates those every 2-4 weeks) — we only passively
 // read what the client fetches, plus embedded JSON in the initial document.
 
-import { fbAssetKeys, isFbcdn, makeItem, MAX_ITEMS_PER_MESSAGE, trackKey, type MediaItem, type MediaSource } from '../shared/media';
+import {
+  fbAssetKeys,
+  isFbcdn,
+  isProfilePicCrop,
+  makeItem,
+  MAX_ITEMS_PER_MESSAGE,
+  trackKey,
+  type MediaItem,
+  type MediaSource,
+} from '../shared/media';
 import { decodeMpd, fromMpdXml, fromPrefetchReps, type DashPair } from '../shared/dash';
 
 function post(items: MediaItem[]): void {
@@ -157,8 +166,23 @@ function harvest(obj: unknown, source: MediaSource, out: MediaItem[], now: numbe
       } else if (k === 'audio_url') out.push(makeItem(v, 'audio', source, 'graphql', now, true));
     } else if (v && typeof v === 'object') {
       const node = v as Record<string, unknown>;
-      // Image node shape: { uri, width, height }.
-      if (typeof node.uri === 'string' && isFbcdn(node.uri) && typeof node.height === 'number') {
+      // Image node shape: { uri, width, height }. This branch is promiscuous —
+      // it fires on EVERY image node in EVERY response — so it carries two
+      // noise gates the deliberate capture paths don't: profile-picture crops
+      // (path type `tXX.Y-1`) are UI chrome — the stories tray's Create-story
+      // tile ships the viewer's own face this way, which the panel then showed
+      // as "a story from my profile" that was never posted — and sub-200px
+      // renditions are avatars and tray previews of stories never opened (the
+      // DOM scan applies the same 200px floor). Video posters are unaffected:
+      // they ride THUMB_KEYS, not this branch.
+      if (
+        typeof node.uri === 'string' &&
+        isFbcdn(node.uri) &&
+        typeof node.height === 'number' &&
+        node.height >= 200 &&
+        (typeof node.width !== 'number' || node.width >= 200) &&
+        !isProfilePicCrop(node.uri)
+      ) {
         out.push(makeItem(node.uri, 'image', source, 'graphql', now));
       }
       harvest(v, source, out, now, depth + 1);
