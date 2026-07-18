@@ -10,7 +10,8 @@
     "build": "npm run icons && node scripts/build.mjs",
     "dev": "npm run icons && node scripts/build.mjs --watch",
     "test": "node scripts/test.mjs",
-    "typecheck": "tsc --noEmit && tsc -p tests --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tests --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",

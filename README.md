@@ -86,6 +86,11 @@ But the **DASH segments** the player downloads do cross the network. FaceScrap:
 `<ContentProtection>` (DRM) entries are detected and discarded: they cannot be
 decrypted.
 
+## Development
+
+`npm run dev` rebuilds on save, `npm run check` runs the type check plus the
+unit suite, and `npm run build` produces the loadable `dist/`.
+
 ## Load in Chrome
 
 1. `npm install`, then `npm run build`

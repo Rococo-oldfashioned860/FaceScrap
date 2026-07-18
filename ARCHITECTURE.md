@@ -40,7 +40,7 @@ bundling it, or passing `classWorkerURL` spawns a module worker and breaks
 
 ## Verifying a change
 
-In order:
+In order (`npm run check` chains the first two):
 
 ```bash
 npm run typecheck   # tsc --noEmit over src/ and tests/
