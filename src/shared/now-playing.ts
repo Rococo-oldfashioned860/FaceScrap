@@ -487,9 +487,17 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // Refresh only on FRESH streaming — window residue must not keep a finished
     // video pinned past the handover to the next one.
     prev.at = now;
-  } else if (ref != null && !ref.hasVideo && active.size > 0) {
-    // A non-video slide (photo story) is centered now — it supersedes the
-    // remembered video; "now playing" follows what the user is viewing.
+  } else if (ref != null && !ref.hasVideo && (active.size > 0 || activeSig !== prev.seenActive)) {
+    // A non-video slide is centered now and it is NOT the slide the remembered
+    // video was endorsed under: a photo story (centered ids), or a dead
+    // "story no longer available" bucket (no ids, no cover — but its card
+    // marker moved). Either way it supersedes the remembered video — "now
+    // playing" follows what the user is viewing, and keeping the previous
+    // profile's story endorsed over an unavailable card paints the wrong
+    // story. The content script debounces transient empties (1.2s), so a
+    // no-signal emission reaching here is a stable real slide. A mute slide
+    // whose marker cannot advance at all keeps the sticky: with no signal of
+    // change there is nothing honest to act on.
     lastLive.delete(tid);
   }
 

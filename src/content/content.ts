@@ -186,19 +186,23 @@ function closestAttrValue(
 
 // The current story card's own id: the story viewer tags each card container with
 // data-id=<base64 story id> ("Uz…"). Unlike the URL path — which stays pinned to the
-// card the tray was opened on — this advances as you move through the tray.
-function storyCardDomId(video: HTMLVideoElement): string | undefined {
-  return closestAttrValue(video, 'data-id', (id) => id.startsWith('Uz') && id.length > 12);
+// card the tray was opened on — this advances as you move through the tray. The
+// anchor can be ANY element inside the card (the playing video, or the topmost
+// centre element when the card has no video at all — a photo card, or a dead
+// "story no longer available" bucket).
+function storyCardDomId(anchor: Element): string | undefined {
+  return closestAttrValue(anchor, 'data-id', (id) => id.startsWith('Uz') && id.length > 12);
 }
 
 // Durable per-story-card marker: `u:<owner>/<card>`. Survives panel reopen and page
 // reload; immune to fbcdn prefetch; empty off /stories. Prefer the DOM card id over
-// the URL's <card> segment — the URL segment stays constant across the whole tray —
-// falling back to the URL when the video is off-DOM.
-function storyCardMark(video?: HTMLVideoElement): string {
+// the URL's <card> segment — the URL segment stays constant across the whole tray
+// (verified live: it does not advance even across BUCKETS in the home-feed
+// viewer) — falling back to the URL only when no DOM anchor is available.
+function storyCardMark(anchor?: Element): string {
   const m = location.pathname.match(/\/stories\/([^/]+)\/([^/]+)/);
   if (!m) return '';
-  const domId = video ? storyCardDomId(video) : undefined;
+  const domId = anchor ? storyCardDomId(anchor) : undefined;
   return `u:${m[1]}/${domId ?? m[2]}`;
 }
 
@@ -235,6 +239,7 @@ function centreMedia(): {
   covers: string[];
   mark: string;
   videoEl?: HTMLVideoElement;
+  centreEl?: Element;
 } {
   const ids = new Set<string>();
   const covers: string[] = [];
@@ -246,6 +251,12 @@ function centreMedia(): {
   // The chosen <video> element, exposed so detectPlaying can read its per-card
   // (storyCardDomId) / per-reel (reelVideoId) DOM id for an accurate now-playing anchor.
   let videoEl: HTMLVideoElement | undefined;
+  // Topmost element at the centre — the card-id anchor of last resort for slides
+  // with NO video at all (photo cards, dead "no longer available" buckets): the
+  // viewer URL never advances, so without a DOM anchor those slides would be
+  // indistinguishable from the previous one and the panel would keep the
+  // previous profile's story endorsed while the user looks at something else.
+  let centreEl: Element | undefined;
   const cx = Math.round(window.innerWidth / 2);
   const cy = Math.round(window.innerHeight / 2);
 
@@ -269,6 +280,7 @@ function centreMedia(): {
   let gotVideo = false;
   let gotCover = false;
   for (const el of document.elementsFromPoint(cx, cy)) {
+    centreEl ??= el;
     if (!gotVideo && el instanceof HTMLVideoElement) {
       // A video BELOW the topmost large cover is the previous slide buried under
       // the active photo (the story viewer keeps old slides stacked) — it is not
@@ -325,7 +337,14 @@ function centreMedia(): {
     }
     if (best) adoptVideo(best);
   }
-  return { ids: [...ids], hasVideo: hasVideo || anyVideoPlaying(), covers: covers.slice(0, 3), mark, videoEl };
+  return {
+    ids: [...ids],
+    hasVideo: hasVideo || anyVideoPlaying(),
+    covers: covers.slice(0, 3),
+    mark,
+    videoEl,
+    centreEl,
+  };
 }
 
 /** Video id from the page URL (/reel/<id>, /videos/<id>, /watch?v=<id>) — an
@@ -347,11 +366,13 @@ function urlVideoId(): string | undefined {
 
 function detectPlaying(): void {
   if (disposed) return;
-  const { ids, hasVideo, covers, mark: videoMk, videoEl } = centreMedia();
+  const { ids, hasVideo, covers, mark: videoMk, videoEl, centreEl } = centreMedia();
   // Combine the durable story-card signal with the per-video-load marker so the mark
   // changes if either does. Format: `u:<owner>/<card>#<videoMark>` on stories, bare
-  // `<videoMark>` on reels/feed (storyCardMark is empty there).
-  const mark = [storyCardMark(videoEl), videoMk].filter(Boolean).join('#');
+  // `<videoMark>` on reels/feed (storyCardMark is empty there). The card anchor
+  // prefers the playing video, else the topmost centre element — a photo card
+  // or a dead bucket still advances the mark that way.
+  const mark = [storyCardMark(videoEl ?? centreEl), videoMk].filter(Boolean).join('#');
   // Debounce transient empties during slide transitions to avoid flicker.
   if (ids.length === 0 && !hasVideo) {
     if (emptySince === 0) emptySince = Date.now();
