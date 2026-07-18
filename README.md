@@ -1,6 +1,6 @@
 # FaceScrap
 
-[![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yml)
+[![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Save the Facebook **reels, stories and highlights** you can watch, with one click.
