@@ -1,5 +1,7 @@
 # FaceScrap
 
+**English** · [Español (México)](README.es.md)
+
 [![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml)
 [![Release](https://img.shields.io/github/v/release/Hydza/FaceScrap?color=8957e5&label=release)](https://github.com/Hydza/FaceScrap/releases/latest)
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-1a73e8)](manifest.json)
