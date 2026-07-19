@@ -1,6 +1,8 @@
 // Shared media model + pure helpers (no chrome.* here — this file is also
 // bundled into the MAIN-world page hook, which has no extension APIs).
 
+import { isStoryDomId } from './story-mark';
+
 export type MediaKind = 'video' | 'image' | 'audio';
 export type MediaSource = 'reel' | 'story' | 'highlight' | 'video' | 'page';
 export type MediaOrigin = 'network' | 'graphql' | 'dom';
@@ -30,6 +32,12 @@ export interface MediaItem {
   trackIds?: string[];
   /** Total video duration in seconds, from the DASH manifest. Videos only. */
   durationSec?: number;
+  /**
+   * Opaque DOM Story card ids whose GraphQL nodes contained this video. One
+   * underlying Facebook video may be reposted by several cards, so this is a
+   * small bounded set rather than one last-writer-wins value.
+   */
+  storyIds?: string[];
   origin: MediaOrigin;
   addedAt: number;
 }
@@ -100,16 +108,38 @@ export function widenDashUrl(url: string): string {
 }
 
 /**
- * Dedupe id: prefer the numeric fbcdn asset id embedded in the path
- * (stable across the rotating oh/oe signature params). Falls back to path.
+ * Canonical identity of one downloadable fbcdn object. The path identifies the
+ * actual representation; the numeric video id alone does not, because every
+ * rung in a DASH ladder can carry the same number. CDN host/routing prefixes,
+ * byte ranges, and rotating signature params are deliberately ignored so the
+ * manifest URL and the request URL for the same track still meet.
  */
 export function mediaId(url: string): string {
   try {
     const u = new URL(url);
-    const m = u.pathname.match(/(\d{8,})/);
-    return m ? `fb:${m[1]}` : `path:${u.pathname}`;
+    const path = u.pathname.replace(/^\/o\d+\/(?=v\/)/, '/');
+    const tag = u.searchParams.get('tag');
+    // Facebook's simple GraphQL fixture shape (also used by older stored rows)
+    // already had a path-derived `video-*` id. Preserve that canonical spelling
+    // while still deriving it here rather than trusting the supplied field.
+    const simpleVideo = path.match(/^\/v\/t42\/([^/]+)\.mp4$/);
+    if (simpleVideo) return `video-${simpleVideo[1]}${tag == null ? '' : `?tag=${encodeURIComponent(tag)}`}`;
+    return `asset:${path}${tag == null ? '' : `?tag=${encodeURIComponent(tag)}`}`;
   } catch {
-    return url;
+    return `invalid:${url}`;
+  }
+}
+
+/** Identity produced by FaceScrap 1.0 before representation-safe canonical
+ * ids were introduced. Kept only as a read/display alias for persisted session
+ * rows and Saved receipts; all new writes use mediaId(). */
+export function legacyMediaId(url: string): string | undefined {
+  try {
+    const pathname = new URL(url).pathname;
+    const numeric = pathname.match(/(\d{8,})/);
+    return numeric ? `fb:${numeric[1]}` : `path:${pathname}`;
+  } catch {
+    return undefined;
   }
 }
 
@@ -209,20 +239,89 @@ const ORIGINS: ReadonlySet<string> = new Set(['network', 'graphql', 'dom']);
 // Hard caps on the untrusted page-message channel: a hostile co-resident script
 // can post arbitrarily large payloads; bound what one message may cost us.
 export const MAX_ITEMS_PER_MESSAGE = 500;
-const MAX_URL_LEN = 8192;
-const MAX_TRACK_IDS = 300;
-// ECMAScript's max time value; `new Date(n).toISOString()` throws RangeError past
-// it, so bound addedAt here where every other field is already bounded.
+export const MAX_MEDIA_URL_LEN = 8192;
+export const MAX_TRACK_IDS = 64;
+export const MAX_MEDIA_ITEM_BYTES = 64 * 1024;
+export const MAX_MEDIA_BATCH_BYTES = 512 * 1024;
+export const MAX_STORY_IDS = 8;
+// A capture timestamp is minted in the renderer and may spend a little time in
+// an acknowledged retry queue. It is not authority for retention order beyond
+// that small transit window.
 const MAX_TIME = 8_640_000_000_000_000;
+const MAX_CAPTURE_AGE_MS = 10 * 60 * 1000;
+const MAX_CAPTURE_FUTURE_SKEW_MS = 2 * 60 * 1000;
 
-export function sanitizeIncomingItems(raw: unknown): MediaItem[] {
+function normalizeAddedAt(raw: unknown, now: number, allowHistorical: boolean): number {
+  const safeNow = Number.isFinite(now) && Math.abs(now) <= MAX_TIME ? now : Date.now();
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || Math.abs(raw) > MAX_TIME) return safeNow;
+  if (raw <= 0 || raw > safeNow + MAX_CAPTURE_FUTURE_SKEW_MS) return safeNow;
+  if (!allowHistorical && raw < safeNow - MAX_CAPTURE_AGE_MS) return safeNow;
+  return raw;
+}
+
+/** UTF-8 serialized size used by both page-channel validation and bounded
+ * delivery queues. Invalid/cyclic values are treated as infinitely large. */
+export function mediaItemWeight(value: unknown): number {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === 'string'
+      ? new TextEncoder().encode(serialized).byteLength
+      : Number.POSITIVE_INFINITY;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function normalizeTrackIds(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
+  const prefix = raw.slice(0, MAX_TRACK_IDS);
+  return prefix.every((track) => typeof track === 'string' && track.length <= 512)
+    ? prefix as string[]
+    : [];
+}
+
+function normalizeStoryIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  // Inspect only a small prefix even if a hostile page supplies a huge array.
+  for (const value of raw.slice(0, MAX_STORY_IDS * 4)) {
+    if (!isStoryDomId(value) || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length === MAX_STORY_IDS) break;
+  }
+  return out;
+}
+
+/** Merge oldest-to-newest associations while keeping the newest bounded tail.
+ *  A popular video can be reposted by many Story cards; keeping the first eight
+ *  would eventually discard the card the user just opened and defeat the exact
+ *  now-playing association this field exists to provide. */
+function mergeStoryIds(older: unknown, newer: unknown): string[] {
+  const out: string[] = [];
+  for (const id of [...normalizeStoryIds(older), ...normalizeStoryIds(newer)]) {
+    const previous = out.indexOf(id);
+    if (previous >= 0) out.splice(previous, 1);
+    out.push(id);
+  }
+  if (out.length > MAX_STORY_IDS) out.splice(0, out.length - MAX_STORY_IDS);
+  return out;
+}
+
+export function sanitizeIncomingItems(
+  raw: unknown,
+  maxTotalBytes = Number.POSITIVE_INFINITY,
+  now = Date.now(),
+): MediaItem[] {
+  if (!Array.isArray(raw)) return [];
+  if (!(maxTotalBytes > 0)) return [];
   const out: MediaItem[] = [];
+  let totalBytes = 0;
   for (const r of raw.slice(0, MAX_ITEMS_PER_MESSAGE)) {
     if (!r || typeof r !== 'object') continue;
     const it = r as Record<string, unknown>;
-    if (typeof it.id !== 'string' || !it.id || it.id.length > 256) continue;
-    if (typeof it.url !== 'string' || it.url.length > MAX_URL_LEN || !isFbcdn(it.url)) continue;
+    if (typeof it.url !== 'string' || it.url.length > MAX_MEDIA_URL_LEN || !isFbcdn(it.url)) continue;
     // fbcdn-hosted UI chrome (rsrc.php sprites/emoji) rides along in GraphQL
     // bodies as image URIs — it is never downloadable media.
     if (isStaticFbAsset(it.url)) continue;
@@ -232,36 +331,42 @@ export function sanitizeIncomingItems(raw: unknown): MediaItem[] {
     // Optional URL-bearing fields, if present, must also be fbcdn (and bounded).
     if (
       it.audioUrl !== undefined &&
-      (typeof it.audioUrl !== 'string' || it.audioUrl.length > MAX_URL_LEN || !isFbcdn(it.audioUrl))
+      (typeof it.audioUrl !== 'string' || it.audioUrl.length > MAX_MEDIA_URL_LEN || !isFbcdn(it.audioUrl))
     ) {
       continue;
     }
     if (
       it.thumbUrl !== undefined &&
-      (typeof it.thumbUrl !== 'string' || it.thumbUrl.length > MAX_URL_LEN || !isFbcdn(it.thumbUrl))
+      (typeof it.thumbUrl !== 'string' || it.thumbUrl.length > MAX_MEDIA_URL_LEN || !isFbcdn(it.thumbUrl))
     ) {
       continue;
     }
 
     const clean: MediaItem = {
-      id: it.id,
+      id: mediaId(it.url),
       url: it.url,
       kind: it.kind as MediaKind,
       source: it.source as MediaSource,
       origin: it.origin as MediaOrigin,
-      addedAt:
-        typeof it.addedAt === 'number' && Number.isFinite(it.addedAt) && Math.abs(it.addedAt) <= MAX_TIME
-          ? it.addedAt
-          : Date.now(),
+      addedAt: normalizeAddedAt(it.addedAt, now, false),
     };
     if (typeof it.dash === 'boolean') clean.dash = it.dash;
     if (typeof it.audioUrl === 'string') clean.audioUrl = it.audioUrl;
     if (typeof it.thumbUrl === 'string') clean.thumbUrl = it.thumbUrl;
     if (typeof it.height === 'number' && Number.isFinite(it.height)) clean.height = it.height;
     if (typeof it.durationSec === 'number' && Number.isFinite(it.durationSec)) clean.durationSec = it.durationSec;
-    if (Array.isArray(it.trackIds) && it.trackIds.every((t) => typeof t === 'string' && t.length <= 512)) {
-      clean.trackIds = (it.trackIds as string[]).slice(0, MAX_TRACK_IDS);
-    }
+    const trackIds = normalizeTrackIds(it.trackIds);
+    if (trackIds.length > 0) clean.trackIds = trackIds;
+    const storyIds = normalizeStoryIds(it.storyIds);
+    if (storyIds.length > 0) clean.storyIds = storyIds;
+    const itemBytes = mediaItemWeight(clean);
+    if (itemBytes > MAX_MEDIA_ITEM_BYTES) continue;
+    // Runtime-message receivers pass their transport budget here. Stop as soon
+    // as the next clean item would cross it: the sender's ordered ACK queue
+    // already splits legitimate traffic, while a forged 500-item renderer
+    // payload cannot make the worker allocate/copy tens of megabytes first.
+    if (totalBytes + itemBytes > maxTotalBytes) break;
+    totalBytes += itemBytes;
     out.push(clean);
   }
   return out;
@@ -269,7 +374,7 @@ export function sanitizeIncomingItems(raw: unknown): MediaItem[] {
 
 /** Classify a raw fbcdn request of webRequest type `media` (the service-worker observer filters on type before calling). */
 export function classifyNetworkRequest(url: string, now: number, source: MediaSource = 'video'): MediaItem | null {
-  if (!isFbcdn(url)) return null;
+  if (url.length > MAX_MEDIA_URL_LEN || !isFbcdn(url)) return null;
   const isDash = /[?&](bytestart|byteend)=/.test(url);
   return makeItem(widenDashUrl(url), 'video', source, 'network', now, isDash);
 }
@@ -280,42 +385,129 @@ export function classifyNetworkRequest(url: string, now: number, source: MediaSo
  * it in place — the same video then becomes downloadable WITH audio.
  * Returns [merged, changed].
  */
-export function mergeMedia(existing: MediaItem[], incoming: MediaItem[]): [MediaItem[], boolean] {
+function normalizeMergeCandidate(raw: MediaItem, now: number, allowHistorical: boolean): MediaItem | null {
+  if (mediaItemWeight(raw) > MAX_MEDIA_ITEM_BYTES) return null;
+  if (
+    !raw || typeof raw !== 'object' ||
+    typeof raw.url !== 'string' || raw.url.length > MAX_MEDIA_URL_LEN || !isFbcdn(raw.url) ||
+    isStaticFbAsset(raw.url) ||
+    typeof raw.kind !== 'string' || !MEDIA_KINDS.has(raw.kind) ||
+    typeof raw.source !== 'string' || !MEDIA_SOURCES.has(raw.source) ||
+    typeof raw.origin !== 'string' || !ORIGINS.has(raw.origin)
+  ) return null;
+  if (
+    raw.audioUrl !== undefined &&
+    (typeof raw.audioUrl !== 'string' || raw.audioUrl.length > MAX_MEDIA_URL_LEN || !isFbcdn(raw.audioUrl))
+  ) return null;
+  if (
+    raw.thumbUrl !== undefined &&
+    (typeof raw.thumbUrl !== 'string' || raw.thumbUrl.length > MAX_MEDIA_URL_LEN || !isFbcdn(raw.thumbUrl))
+  ) return null;
+
+  const it: MediaItem = {
+    id: mediaId(raw.url),
+    url: raw.url,
+    kind: raw.kind,
+    source: raw.source,
+    origin: raw.origin,
+    addedAt: normalizeAddedAt(raw.addedAt, now, allowHistorical),
+  };
+  if (typeof raw.dash === 'boolean') it.dash = raw.dash;
+  if (typeof raw.audioUrl === 'string') it.audioUrl = raw.audioUrl;
+  if (typeof raw.thumbUrl === 'string') it.thumbUrl = raw.thumbUrl;
+  if (typeof raw.height === 'number' && Number.isFinite(raw.height)) it.height = raw.height;
+  if (typeof raw.durationSec === 'number' && Number.isFinite(raw.durationSec)) it.durationSec = raw.durationSec;
+  const trackIds = normalizeTrackIds(raw.trackIds);
+  if (trackIds.length > 0) it.trackIds = trackIds;
+  const storyIds = normalizeStoryIds(raw.storyIds);
+  if (storyIds.length > 0) it.storyIds = storyIds;
+  return mediaItemWeight(it) <= MAX_MEDIA_ITEM_BYTES ? it : null;
+}
+
+export function mergeMedia(existing: MediaItem[], incoming: MediaItem[], now = Date.now()): [MediaItem[], boolean] {
   const byId = new Map<string, MediaItem>();
-  for (const m of existing) byId.set(m.id, m);
   let changed = false;
-  for (const raw of incoming) {
-    // Persistence boundary (defense in depth): never store a non-fbcdn URL, even
-    // if some future caller reaches mergeMedia without sanitizeIncomingItems. If
-    // nothing non-fbcdn is ever stored, nothing non-fbcdn can ever be rendered.
-    // The optional URL fields get the same gate as `url`, so the "nothing
-    // non-fbcdn is stored" invariant covers every URL the item carries.
-    if (!raw.id || !raw.url || !isFbcdn(raw.url)) continue;
-    const it =
-      (raw.audioUrl != null && !isFbcdn(raw.audioUrl)) || (raw.thumbUrl != null && !isFbcdn(raw.thumbUrl))
-        ? { ...raw, audioUrl: raw.audioUrl && isFbcdn(raw.audioUrl) ? raw.audioUrl : undefined, thumbUrl: raw.thumbUrl && isFbcdn(raw.thumbUrl) ? raw.thumbUrl : undefined }
-        : raw;
+  const insert = (raw: MediaItem, allowHistorical: boolean, isIncoming: boolean): void => {
+    const it = normalizeMergeCandidate(raw, now, allowHistorical);
+    if (!it) {
+      if (!isIncoming) changed = true;
+      return;
+    }
+    if (!isIncoming && (raw.id !== it.id || raw.addedAt !== it.addedAt || mediaItemWeight(raw) !== mediaItemWeight(it))) {
+      changed = true;
+    }
     const prev = byId.get(it.id);
     if (!prev) {
       byId.set(it.id, it);
-      changed = true;
-      continue;
+      if (isIncoming) changed = true;
+      return;
     }
-    // Enrich an existing item in place when a later capture adds a linked
-    // audio track and/or a thumbnail it didn't have before.
+    // Two persisted legacy rows may name the same URL with different forged or
+    // pre-canonical ids. The returned map compacts them; flag the migration so
+    // storage writes that repaired shape back even when neither row enriches it.
+    if (!isIncoming) changed = true;
+    // Enrich transactionally: every accepted intermediate shape must remain a
+    // valid storable item. Never delete a field already present on `prev` just
+    // to make room for new metadata. Strong playback associations win first;
+    // lower-priority track/preview metadata is admitted only while it fits.
     const gainsAudio = Boolean(it.audioUrl) && !prev.audioUrl;
     const gainsThumb = Boolean(it.thumbUrl) && !prev.thumbUrl;
     const gainsTracks = Boolean(it.trackIds?.length) && !prev.trackIds?.length;
-    if (gainsAudio || gainsThumb || gainsTracks) {
-      byId.set(it.id, {
-        ...prev,
-        audioUrl: prev.audioUrl ?? it.audioUrl,
-        thumbUrl: prev.thumbUrl ?? it.thumbUrl,
-        trackIds: prev.trackIds ?? it.trackIds,
-        dash: gainsAudio ? true : prev.dash,
-      });
+    const previousStoryIds = normalizeStoryIds(prev.storyIds);
+    const mergedStoryIds = mergeStoryIds(previousStoryIds, it.storyIds);
+    const storyOrderChanged =
+      mergedStoryIds.length !== previousStoryIds.length ||
+      mergedStoryIds.some((id, index) => id !== previousStoryIds[index]);
+    let enriched = prev;
+    let enrichedChanged = false;
+    const accept = (candidate: MediaItem): boolean => {
+      if (mediaItemWeight(candidate) > MAX_MEDIA_ITEM_BYTES) return false;
+      enriched = candidate;
+      enrichedChanged = true;
+      return true;
+    };
+
+    if (storyOrderChanged) {
+      const candidate = { ...enriched };
+      if (mergedStoryIds.length > 0) candidate.storyIds = mergedStoryIds;
+      else delete candidate.storyIds;
+      accept(candidate);
+    }
+    if (gainsAudio && it.audioUrl != null) {
+      accept({ ...enriched, audioUrl: it.audioUrl, dash: true });
+    }
+    if (gainsTracks && it.trackIds != null) {
+      // Keep the longest useful prefix that fits. Serialized weight grows
+      // monotonically with this string prefix, so binary search bounds hostile
+      // batches to O(log MAX_TRACK_IDS) full-size serializations per item.
+      const base = enriched;
+      let low = 1;
+      let high = it.trackIds.length;
+      let best: MediaItem | null = null;
+      while (low <= high) {
+        const count = Math.floor((low + high) / 2);
+        const candidate = { ...base, trackIds: it.trackIds.slice(0, count) };
+        if (mediaItemWeight(candidate) <= MAX_MEDIA_ITEM_BYTES) {
+          best = candidate;
+          low = count + 1;
+        } else {
+          high = count - 1;
+        }
+      }
+      if (best != null) accept(best);
+    }
+    if (gainsThumb && it.thumbUrl != null) {
+      accept({ ...enriched, thumbUrl: it.thumbUrl });
+    }
+    if (enrichedChanged) {
+      byId.set(it.id, enriched);
       changed = true;
     }
-  }
+  };
+  // Persisted rows may legitimately be older than the renderer transit window,
+  // but still cannot claim a future/negative/extreme date. New captures get the
+  // tighter freshness bound even when a caller bypasses sanitizeIncomingItems.
+  for (const raw of existing) insert(raw, true, false);
+  for (const raw of incoming) insert(raw, false, true);
   return [Array.from(byId.values()), changed];
 }

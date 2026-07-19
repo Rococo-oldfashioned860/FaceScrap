@@ -15,6 +15,7 @@
   },
   "permissions": [
     "webRequest",
+    "webNavigation",
     "storage",
     "downloads",
     "declarativeNetRequest",

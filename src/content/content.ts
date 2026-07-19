@@ -4,10 +4,48 @@
 // - Relays media the hook reports to the service worker.
 // - Scans the rendered DOM (<video>/<img>/poster) as a fallback.
 
-import { isFbcdn, isStaticFbAsset, makeItem, mediaId, sanitizeIncomingItems, type MediaItem } from '../shared/media';
-import type { RuntimeMessage } from '../shared/messages';
-import { isStoryPath, storyCardMark as formatStoryCardMark } from '../shared/story-mark';
-import { createVideoMarkFactory } from '../shared/video-mark';
+import { createAckedLatest, type AckedLatestOutcome } from '../shared/acked-latest';
+import { createAckedBatch } from '../shared/acked-batch';
+import { withTimeout } from '../shared/async';
+import {
+  diagBump,
+  diagDrain,
+  sanitizeDiagCounters,
+  setDiagEnabled,
+  type DiagReason,
+} from '../shared/diag';
+import {
+  isFbcdn,
+  isStaticFbAsset,
+  makeItem,
+  MAX_ITEMS_PER_MESSAGE,
+  MAX_MEDIA_BATCH_BYTES,
+  mediaItemWeight,
+  mediaId,
+  mergeMedia,
+  sanitizeIncomingItems,
+  type MediaItem,
+} from '../shared/media';
+import {
+  nextPlayingDetectedAt,
+  type MediaFoundAck,
+  type NowPlayingAck,
+  type NowPlayingMsg,
+  type RuntimeMessage,
+} from '../shared/messages';
+import { loadSettings } from '../shared/settings';
+import { isStoryDomId, isStoryPath, storyCardMark as formatStoryCardMark } from '../shared/story-mark';
+import {
+  discardPlaceholderCoverEvidence,
+  pickBestVideoIndex,
+  type VideoCandidate,
+} from '../shared/centre-video';
+import { combineVideoMark, createVideoMarkFactory } from '../shared/video-mark';
+import {
+  createCounterCoalescer,
+  createMediaIngressBudget,
+  createNavIngressBudget,
+} from './content-ingress-limits';
 
 // After the extension is reloaded/updated, this content script keeps running in
 // the already-open page but its chrome.* context is dead — calls then throw
@@ -16,9 +54,18 @@ import { createVideoMarkFactory } from '../shared/video-mark';
 let disposed = false;
 let poller: number | undefined;
 let observer: MutationObserver | undefined;
+let mediaRetryTimer: number | undefined;
+let diagReportTimer: number | undefined;
+let scanTimer: number | undefined;
+let initialScanTimer: number | undefined;
+let scrollTimer: number | undefined;
 // Every DOM/window listener below registers with this signal, so teardown()
 // detaches them all at once instead of leaving them firing into a dead context.
 const listeners = new AbortController();
+const documentToken =
+  typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, '0')).join('-');
 
 function alive(): boolean {
   try {
@@ -32,6 +79,11 @@ function teardown(): void {
   if (disposed) return;
   disposed = true;
   if (poller !== undefined) clearInterval(poller);
+  if (mediaRetryTimer !== undefined) clearTimeout(mediaRetryTimer);
+  if (diagReportTimer !== undefined) clearTimeout(diagReportTimer);
+  if (scanTimer !== undefined) clearTimeout(scanTimer);
+  if (initialScanTimer !== undefined) clearTimeout(initialScanTimer);
+  if (scrollTimer !== undefined) clearTimeout(scrollTimer);
   observer?.disconnect();
   listeners.abort();
 }
@@ -49,8 +101,151 @@ function send(message: RuntimeMessage): void {
   }
 }
 
+const MEDIA_ACK_TIMEOUT_MS = 5_000;
+const MEDIA_RETRY_BASE_MS = 500;
+const MEDIA_RETRY_MAX_MS = 10_000;
+const MEDIA_BATCH_MAX_ITEMS = 64;
+const MEDIA_QUEUE_MAX_ITEMS = 2_000;
+const MEDIA_QUEUE_MAX_BYTES = 8 * 1024 * 1024;
+const mediaIngressBudget = createMediaIngressBudget(performance.now());
+const navIngressBudget = createNavIngressBudget(performance.now());
+let mediaRetryFailures = 0;
+const mediaDelivery = createAckedBatch<MediaItem, string>({
+  maxBatch: MEDIA_BATCH_MAX_ITEMS,
+  maxPending: MEDIA_QUEUE_MAX_ITEMS,
+  weight: mediaItemWeight,
+  maxBatchWeight: MAX_MEDIA_BATCH_BYTES,
+  maxPendingWeight: MEDIA_QUEUE_MAX_BYTES,
+  splitOnFailure: true,
+  rotateAfterFailures: 3,
+  // When a sleeping worker meets an unusually wide feed burst, retain the
+  // newest cards (including the one the user just opened) over old prefetches.
+  overflow: 'drop-oldest',
+  key: (item) => item.id,
+  merge: (queued, incoming) => mergeMedia([queued], [incoming])[0][0] ?? incoming,
+});
+
+async function deliverMedia(items: readonly MediaItem[]): Promise<boolean> {
+  if (disposed || !alive()) {
+    teardown();
+    return false;
+  }
+  try {
+    const response = (await withTimeout(
+      chrome.runtime.sendMessage({ type: 'MEDIA_FOUND', items: [...items], documentToken }),
+      MEDIA_ACK_TIMEOUT_MS,
+      'MEDIA_FOUND acknowledgement timed out.',
+    )) as MediaFoundAck | undefined;
+    if (response?.ok === true) return true;
+    // The only permanent rejection is a closed/invalid sender tab. Its content
+    // context has no useful recovery path, so stop its observers instead of
+    // retaining a queue that can never be acknowledged.
+    if (response?.retryable === false) teardown();
+    return false;
+  } catch {
+    if (!alive()) teardown();
+    return false;
+  }
+}
+
+async function pumpMedia(): Promise<void> {
+  // A scheduled retry owns the next attempt. Fresh page traffic may add newer
+  // work behind the failed entry, but cannot defeat the quota backoff by
+  // repeatedly calling relay().
+  if (disposed || mediaRetryTimer !== undefined) return;
+  const before = mediaDelivery.pending;
+  const drained = await mediaDelivery.pump(deliverMedia);
+  if (drained || disposed || mediaDelivery.pending === 0) {
+    mediaRetryFailures = 0;
+    return;
+  }
+  // Concurrent callers share AckedBatch's one pump. Only the first continuation
+  // schedules/increments; the rest see this timer and return.
+  if (mediaRetryTimer !== undefined) return;
+  mediaRetryFailures = mediaDelivery.pending < before ? 0 : Math.min(mediaRetryFailures + 1, 16);
+  const retryMs = Math.min(
+    MEDIA_RETRY_MAX_MS,
+    MEDIA_RETRY_BASE_MS * (2 ** Math.min(Math.max(0, mediaRetryFailures - 1), 5)),
+  );
+  mediaRetryTimer = window.setTimeout(() => {
+    mediaRetryTimer = undefined;
+    void pumpMedia();
+  }, retryMs);
+}
+
 function relay(items: MediaItem[]): void {
-  if (items.length) send({ type: 'MEDIA_FOUND', items });
+  if (items.length === 0) return;
+  const result = mediaDelivery.enqueueMany(items);
+  if (result.dropped > 0) console.warn(`[FaceScrap] media relay queue dropped ${result.dropped} items`);
+  void pumpMedia();
+}
+
+// --- Diagnostics (see diag.ts) ---
+// This script is the only one of the three capture contexts that can both read
+// settings and talk to the worker, so it owns the flag for the MAIN-world hook
+// as well as for its own DOM scan.
+let diagnosticsEnabled = false;
+const DIAG_REPORT_INTERVAL_MS = 1_000;
+const diagReports = createCounterCoalescer<DiagReason>();
+
+function clearPendingDiagReports(): void {
+  if (diagReportTimer !== undefined) {
+    clearTimeout(diagReportTimer);
+    diagReportTimer = undefined;
+  }
+  diagReports.drain();
+}
+
+function flushDiagReports(): void {
+  diagReportTimer = undefined;
+  if (!diagnosticsEnabled || disposed) {
+    diagReports.drain();
+    return;
+  }
+  const counters = diagReports.drain();
+  if (Object.keys(counters).length > 0) send({ type: 'DIAG_REPORT', counters, documentToken });
+}
+
+function publishDiagFlag(): void {
+  if (!alive()) return;
+  void loadSettings()
+    .then((s) => {
+      if (disposed) return;
+      diagnosticsEnabled = s.diagEnabled;
+      setDiagEnabled(s.diagEnabled);
+      if (!s.diagEnabled) clearPendingDiagReports();
+      window.postMessage({ __facescrapCtl: true, diag: s.diagEnabled }, '*');
+    })
+    .catch(() => {
+      diagnosticsEnabled = false;
+      setDiagEnabled(false);
+      clearPendingDiagReports();
+    });
+}
+
+function announceDiagFlag(): void {
+  if (!alive()) return;
+  window.postMessage({ __facescrapCtl: true, diag: diagnosticsEnabled }, '*');
+}
+publishDiagFlag();
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && 'settings' in changes) publishDiagFlag();
+  });
+} catch {
+  /* context gone — the flag stays off */
+}
+
+function reportDiag(counters: unknown): void {
+  // window.postMessage is shared with the page. Never let a co-resident page
+  // script turn this opt-in maintenance channel on by forging hook messages.
+  if (!diagnosticsEnabled) return;
+  const clean = sanitizeDiagCounters(counters);
+  if (Object.keys(clean).length === 0) return;
+  diagReports.add(clean);
+  if (diagReportTimer === undefined) {
+    diagReportTimer = window.setTimeout(flushDiagReports, DIAG_REPORT_INTERVAL_MS);
+  }
 }
 
 // --- Inject the MAIN-world hook (must be an external file; page CSP blocks inline). ---
@@ -75,8 +270,38 @@ window.addEventListener(
   (e) => {
     if (e.source !== window) return;
     const data = e.data;
+    // The hook asks for the flag on load — whichever of us loaded second, this
+    // answers it. Only `query` is honoured: `diag` on this channel is the hook
+    // reading its own announcement back, not a request.
+    if (data && data.__facescrapCtl === true && data.query === true) {
+      // This query crosses the page boundary and is forgeable. Answer from the
+      // cached setting; re-reading storage here would let a page script create
+      // an unbounded stream of extension storage operations.
+      announceDiagFlag();
+      return;
+    }
     if (data && data.__facescrap === true) {
-      relay(sanitizeIncomingItems(data.items));
+      if (data.diag !== undefined) {
+        reportDiag(data.diag);
+        return;
+      }
+      // SPA navigation: re-detect now instead of waiting up to a poller tick.
+      // Forgeable by a co-resident script, but the worst it buys is an extra
+      // call that only reads already-visible DOM — the same reach a synthetic
+      // scroll event would already have.
+      if (data.nav === true) {
+        if (navIngressBudget.tryTake(1, 1, performance.now())) detectPlaying();
+        return;
+      }
+      // The real hook chunks at this exact bound. Reject an oversized forged
+      // array before sanitization so even calculating its charge stays bounded.
+      if (!Array.isArray(data.items) || data.items.length > MAX_ITEMS_PER_MESSAGE) return;
+      const items = sanitizeIncomingItems(data.items, MEDIA_QUEUE_MAX_BYTES);
+      if (items.length === 0) return;
+      let bytes = 0;
+      for (const item of items) bytes += mediaItemWeight(item);
+      if (!mediaIngressBudget.tryTake(items.length, bytes, performance.now())) return;
+      relay(items);
     }
   },
   { signal: listeners.signal },
@@ -107,10 +332,11 @@ function scanDom(): void {
     }
   });
 
+  diagBump('captureDom', out.length);
+  reportDiag(diagDrain());
   relay(out);
 }
 
-let scanTimer: number | undefined;
 function throttledScan(): void {
   if (scanTimer !== undefined) return;
   scanTimer = window.setTimeout(() => {
@@ -121,17 +347,49 @@ function throttledScan(): void {
 
 observer = new MutationObserver(throttledScan);
 observer.observe(document.documentElement, { childList: true, subtree: true });
-document.addEventListener('DOMContentLoaded', scanDom);
-window.addEventListener('load', () => window.setTimeout(scanDom, 1500));
+document.addEventListener('DOMContentLoaded', scanDom, { signal: listeners.signal });
+window.addEventListener(
+  'load',
+  () => {
+    initialScanTimer = window.setTimeout(() => {
+      initialScanTimer = undefined;
+      scanDom();
+    }, 1500);
+  },
+  { signal: listeners.signal },
+);
 
 // --- Detect what's being watched and report it to the worker so the side panel
 //     can show only that. Heuristic: the topmost fbcdn media element at the viewport
 //     centre is what's on screen — elementsFromPoint() returns hits top-first, so the
 //     viewer's active (top-stacked) slide wins over buried previous slides. Works for
 //     photo stories too, and is independent of Facebook's class names. ---
-let lastPlayingKey = '';
-let emptySince = 0;
-let scrollTimer: number | undefined;
+const playingDelivery = createAckedLatest<NowPlayingMsg>();
+const PLAYING_ACK_TIMEOUT_MS = 5_000;
+let lastPlayingDetectedAt = 0;
+let emptySince: number | undefined;
+
+async function deliverPlaying(message: NowPlayingMsg): Promise<AckedLatestOutcome> {
+  if (disposed) return 'retry';
+  if (!alive()) {
+    teardown();
+    return 'retry';
+  }
+  try {
+    const response = (await withTimeout(
+      chrome.runtime.sendMessage(message),
+      PLAYING_ACK_TIMEOUT_MS,
+      'NOW_PLAYING acknowledgement timed out.',
+    )) as NowPlayingAck | undefined;
+    if (response?.ok === true) return 'accepted';
+    return response?.ok === false && response.retryable === false ? 'refresh' : 'retry';
+  } catch {
+    // A sleeping/restarting worker or a busy storage lane is recoverable. The
+    // next detector poll reuses this message and its original detectedAt.
+    if (!alive()) teardown();
+    return 'retry';
+  }
+}
 
 /** An fbcdn cover URL from an <img> src or a CSS background-image. */
 function fbcdnCoverUrl(el: Element): string | undefined {
@@ -193,7 +451,7 @@ function closestAttrValue(
 // centre element when the card has no video at all — a photo card, or a dead
 // "story no longer available" bucket).
 function storyCardDomId(anchor: Element): string | undefined {
-  return closestAttrValue(anchor, 'data-id', (id) => id.startsWith('Uz') && id.length > 12);
+  return closestAttrValue(anchor, 'data-id', isStoryDomId);
 }
 
 // Story-card marker: a DOM-proven id is durable (`u:<owner>/<card>`), while the
@@ -228,7 +486,9 @@ const markVideoLoad = createVideoMarkFactory(crypto.randomUUID());
 function videoMark(v: HTMLVideoElement): string {
   const src = v.currentSrc || v.src;
   const key: object = (v.srcObject as object | null) ?? v;
-  return markVideoLoad(key, src);
+  // Fold in the reel id: the WeakMap above keys on object identity, which
+  // Facebook may reuse across slides — see combineVideoMark for what that broke.
+  return combineVideoMark(markVideoLoad(key, src), reelVideoId(v));
 }
 
 function centreMedia(): {
@@ -241,6 +501,7 @@ function centreMedia(): {
 } {
   const ids = new Set<string>();
   const covers: string[] = [];
+  const coverIds = new Set<string>();
   // Opaque slide marker (see videoMark/storyCardMark): a per-slide id that CHANGES
   // when the video under the centre changes, on surfaces that expose no cover/poster
   // ids at all (video→video slides otherwise look identical). Compared, never fetched.
@@ -258,15 +519,21 @@ function centreMedia(): {
   const cx = Math.round(window.innerWidth / 2);
   const cy = Math.round(window.innerHeight / 2);
 
-  const adoptVideo = (el: HTMLVideoElement): void => {
+  // `overCover`: this video was adopted DESPITE a cover being hit-tested at the
+  // centre, so that cover belongs to a placeholder, not to what is playing. The
+  // panel learns groupCover from covers[0], so the adopted video's own poster
+  // has to lead or it would durably learn the wrong thumbnail.
+  const adoptVideo = (el: HTMLVideoElement, overCover = false): void => {
     hasVideo = true;
     videoEl = el;
     const src = el.currentSrc || el.src;
     mark = videoMark(el);
+    if (overCover) discardPlaceholderCoverEvidence(ids, covers, coverIds);
     if (src && !src.startsWith('blob:') && isFbcdn(src)) ids.add(mediaId(src));
     if (el.poster && isFbcdn(el.poster)) {
       ids.add(mediaId(el.poster));
-      covers.push(el.poster);
+      if (overCover) covers.unshift(el.poster);
+      else covers.push(el.poster);
     }
   };
 
@@ -280,12 +547,18 @@ function centreMedia(): {
   for (const el of document.elementsFromPoint(cx, cy)) {
     centreEl ??= el;
     if (!gotVideo && el instanceof HTMLVideoElement) {
-      // A video BELOW the topmost large cover is the previous slide buried under
-      // the active photo (the story viewer keeps old slides stacked) — it is not
-      // what the user is watching. Only the video ABOVE the cover counts.
-      if (gotCover) break;
+      // A PAUSED video below the topmost large cover is the previous slide
+      // buried under the active photo (the story viewer keeps old slides
+      // stacked and pauses them) — not what the user is watching.
+      //
+      // A PLAYING one is the opposite case: the new slide's video with a
+      // residual blur-up placeholder still fading out on top of it. Breaking
+      // there adopted the stale cover and showed the wrong thumbnail while the
+      // real video played underneath. Distinguish by playback state, not by
+      // stacking order.
+      if (gotCover && (el.paused || el.ended)) break;
       gotVideo = true;
-      adoptVideo(el);
+      adoptVideo(el, gotCover);
       continue;
     }
     if (!gotCover) {
@@ -293,7 +566,9 @@ function centreMedia(): {
       if (r.width >= 160 && r.height >= 160) {
         const url = fbcdnCoverUrl(el);
         if (url) {
-          ids.add(mediaId(url));
+          const id = mediaId(url);
+          ids.add(id);
+          coverIds.add(id);
           covers.push(url);
           gotCover = true;
         }
@@ -304,36 +579,29 @@ function centreMedia(): {
 
   // elementsFromPoint() only returns hit-testable elements, and the story/reel viewer
   // sets pointer-events:none on the <video> (taps go to the nav overlay), so the walk
-  // above can miss video slides. Fall back to the dominant playing video by visible
-  // area — not the geometric centre, which often lands beside the left-offset reel in
-  // the comments/profile panel. Playing outranks paused (stacked previous and preloaded
-  // next slides are paused); containing the centre only breaks ties. Skipped when a
-  // cover was hit-tested: that's a photo slide, and a video underneath is the buried
-  // previous slide, not what's being watched.
-  if (!gotVideo && !gotCover) {
-    let best: HTMLVideoElement | undefined;
-    let bestScore = -1;
+  // above can miss video slides. Fall back to scoring every video on screen.
+  //
+  // This used to be skipped whenever a cover was hit-tested, which meant a
+  // playing reel under a residual placeholder produced NO adopted video at all.
+  // The cover now only suppresses PAUSED candidates (see pickBestVideoIndex),
+  // so the ranking itself decides. Geometry here, decision there — the decision
+  // is the part worth testing without a browser.
+  if (!gotVideo) {
+    const els: HTMLVideoElement[] = [];
+    const candidates: VideoCandidate[] = [];
     for (const v of document.querySelectorAll('video')) {
-      // Only `ended` disqualifies. readyState is a lie under MSE-in-Workers
-      // (permanently 0 — see anyVideoPlaying), and it used to kill this whole
-      // fallback: the reels viewer routinely leaves the centre point over
-      // overlay DIVs (mid-snap, side rails), so the hit-test walk misses and
-      // THIS loop is the only path that can adopt the playing video. Paused,
-      // data-less prefetch slides still lose: the play boost below dominates.
-      if (v.ended) continue;
       const r = v.getBoundingClientRect();
-      const vw = Math.min(r.right, window.innerWidth) - Math.max(r.left, 0);
-      const vh = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0);
-      if (vw < 100 || vh < 100) continue; // must be substantially on screen
-      const contains = cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
-      // Area maxes around ~2e6 px², so the play/centre boosts always dominate it.
-      const score = vw * vh + (v.paused ? 0 : 4e9) + (contains ? 2e9 : 0);
-      if (score > bestScore) {
-        bestScore = score;
-        best = v;
-      }
+      els.push(v);
+      candidates.push({
+        vw: Math.min(r.right, window.innerWidth) - Math.max(r.left, 0),
+        vh: Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0),
+        paused: v.paused,
+        ended: v.ended,
+        containsCentre: cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom,
+      });
     }
-    if (best) adoptVideo(best);
+    const best = pickBestVideoIndex(candidates, gotCover);
+    if (best !== undefined) adoptVideo(els[best], gotCover);
   }
   return {
     ids: [...ids],
@@ -365,6 +633,8 @@ function urlVideoId(): string | undefined {
 function detectPlaying(): void {
   if (disposed) return;
   const { ids, hasVideo, covers, mark: videoMk, videoEl, centreEl } = centreMedia();
+  const detectedAt = nextPlayingDetectedAt(lastPlayingDetectedAt, Date.now());
+  lastPlayingDetectedAt = detectedAt;
   // Combine the story-card signal with the per-video-load marker so the mark
   // changes if either does. Story prefixes are durable `u:` for DOM-proven cards
   // or provisional `p:` for the pinned-path fallback; reels/feed use the bare
@@ -373,31 +643,51 @@ function detectPlaying(): void {
   const mark = [storyCardMark(videoEl ?? centreEl), videoMk].filter(Boolean).join('#');
   // Debounce transient empties during slide transitions to avoid flicker.
   if (ids.length === 0 && !hasVideo) {
-    if (emptySince === 0) emptySince = Date.now();
-    if (Date.now() - emptySince < 1200) return;
+    const monotonicNow = performance.now();
+    if (emptySince === undefined) emptySince = monotonicNow;
+    if (monotonicNow - emptySince < 1200) return;
   } else {
-    emptySince = 0;
+    emptySince = undefined;
   }
   // Prefer the reels feed's DOM data-video-id (accurate, per-reel) over location's
   // /reel/<id>, which lags the scroll; fall back to the URL on watch pages.
   const vid = (videoEl != null ? reelVideoId(videoEl) : undefined) ?? (hasVideo ? urlVideoId() : undefined);
   const key = `${hasVideo ? 'v' : '-'}|${vid ?? ''}|${mark}|${ids.slice().sort().join(',')}`;
-  if (key === lastPlayingKey) return;
-  lastPlayingKey = key;
-  send({ type: 'NOW_PLAYING', ids, hasVideo, vid, covers, mark });
+  const message = { type: 'NOW_PLAYING', ids, hasVideo, vid, covers, mark, detectedAt, documentToken } satisfies NowPlayingMsg;
+  if (!playingDelivery.offer(key, message)) return;
+  void playingDelivery.pump(deliverPlaying);
 }
 
 for (const evt of ['play', 'playing', 'pause', 'seeked', 'loadeddata'] as const) {
   document.addEventListener(evt, detectPlaying, { capture: true, signal: listeners.signal });
 }
+// Trailing edge, re-armed on every event. The old guard (`if armed, return`)
+// made this fire 200ms after the FIRST scroll of a burst, not the last — so a
+// fast flick through reels sampled a slide mid-transition, and every such
+// emission restamps PlayingRef.at. A slideAt that keeps moving stops any track
+// from ever counting as anchored, which pushes the panel to honest-empty
+// instead of relaying to the new video.
 document.addEventListener(
   'scroll',
   () => {
-    if (scrollTimer !== undefined) return;
+    if (scrollTimer !== undefined) clearTimeout(scrollTimer);
     scrollTimer = window.setTimeout(() => {
       scrollTimer = undefined;
       detectPlaying();
     }, 200);
+  },
+  { capture: true, signal: listeners.signal },
+);
+// The browser knows when momentum and scroll-snap actually settled; a fixed
+// delay only guesses. Chrome 114+, and the manifest requires 116.
+document.addEventListener(
+  'scrollend',
+  () => {
+    if (scrollTimer !== undefined) {
+      clearTimeout(scrollTimer);
+      scrollTimer = undefined;
+    }
+    detectPlaying(); // idempotent via lastPlayingKey, so racing the debounce is harmless
   },
   { capture: true, signal: listeners.signal },
 );
@@ -415,7 +705,7 @@ poller = window.setInterval(detectPlaying, 300);
 // change-guard) whenever the tab becomes visible/focused.
 function reassertPlaying(): void {
   if (disposed) return;
-  lastPlayingKey = '';
+  playingDelivery.invalidateCommitted();
   detectPlaying();
 }
 document.addEventListener(

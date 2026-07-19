@@ -266,6 +266,27 @@
           </div>
         </section>
 
+        <!-- Maintenance aid, off by default: counts WHY captures get discarded.
+             Every capture path swallows its failures on purpose, so without this
+             there is no way to tell "never captured" from "captured and dropped". -->
+        <section class="set-section">
+          <h3 class="set-label" data-i18n="settingsDiagnostics">Diagnostics</h3>
+          <div class="set-card">
+            <div class="set-row two">
+              <span class="set-copy">
+                <span class="set-title" data-i18n="settingsDiagEnabled">Count discarded captures</span>
+                <span class="set-hint" data-i18n="settingsDiagHint">Reload Facebook to apply</span>
+              </span>
+              <label class="switch"><input id="set-diag" type="checkbox" /><span class="track"></span></label>
+            </div>
+            <details id="diag-details" class="set-row col">
+              <summary class="set-title" data-i18n="diagShow">Show counters</summary>
+              <pre id="diag-counters" class="set-input mono"></pre>
+              <button id="diag-reset" class="btn-ghost" type="button" data-i18n="diagReset">Reset counters</button>
+            </details>
+          </div>
+        </section>
+
         <p class="settings-rights" data-i18n="settingsRights">
           Only download content you have the rights to.
         </p>

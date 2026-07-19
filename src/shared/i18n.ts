@@ -95,6 +95,12 @@ export type MsgKey =
   | 'settingsConfirmClear'
   | 'settingsClearList'
   | 'settingsClearHint'
+  | 'settingsDiagnostics'
+  | 'settingsDiagEnabled'
+  | 'settingsDiagHint'
+  | 'diagShow'
+  | 'diagEmpty'
+  | 'diagReset'
   | 'settingsRights'
   | 'clear'
   | 'qualityHighest'
@@ -197,6 +203,12 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     settingsConfirmClear: 'Confirm before clearing',
     settingsClearList: 'Clear captured list',
     settingsClearHint: 'Library only · Saved stays',
+    settingsDiagnostics: 'Diagnostics',
+    settingsDiagEnabled: 'Count discarded captures',
+    settingsDiagHint: 'Reload Facebook to apply',
+    diagShow: 'Show counters',
+    diagEmpty: 'Nothing recorded yet.',
+    diagReset: 'Reset counters',
     settingsRights: 'Only download content you have the rights to.',
     clear: 'Clear',
     qualityHighest: 'Highest',
@@ -297,6 +309,12 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     settingsConfirmClear: 'Confirmar antes de vaciar',
     settingsClearList: 'Vaciar lista capturada',
     settingsClearHint: 'Solo Biblioteca · Guardados permanece',
+    settingsDiagnostics: 'Diagnóstico',
+    settingsDiagEnabled: 'Contar capturas descartadas',
+    settingsDiagHint: 'Recarga Facebook para aplicar',
+    diagShow: 'Ver contadores',
+    diagEmpty: 'Nada registrado aún.',
+    diagReset: 'Reiniciar contadores',
     settingsRights: 'Descarga solo contenido sobre el que tengas derechos.',
     clear: 'Vaciar',
     qualityHighest: 'Mayor',

@@ -14,9 +14,47 @@ import {
   type MediaItem,
   type MediaSource,
 } from '../shared/media';
-import { decodeMpd, fromMpdXml, fromPrefetchReps, type DashPair } from '../shared/dash';
+import {
+  decodeMpd,
+  extractPrefetchPairs,
+  extractStringsByKey,
+  extractUrlsByKey,
+  fromMpdXml,
+  fromPrefetchReps,
+  MPD_STRING_KEYS,
+  VIDEO_KEYS,
+  type DashPair,
+} from '../shared/dash';
+import { diagBump, diagDrain, setDiagEnabled } from '../shared/diag';
+import { storyDomIdForGraphqlChild, storyDomIdFromGraphqlNode } from '../shared/story-mark';
+import {
+  createBoundedCollector,
+  createTextBudget,
+  readClonedResponseTextLimited,
+  trimQueueToBudget,
+  type BoundedCollector,
+} from '../shared/page-hook-limits';
 
-function post(items: MediaItem[]): void {
+// --- Diagnostics control channel (see diag.ts) ---
+// This world has no chrome.*, so the flag has to be handed over by the content
+// script. Ask for it rather than waiting to be told: the hook is injected as a
+// separate <script> and either side can win the load race, and delaying the
+// fetch/XHR patches below to await an answer would miss early traffic — the one
+// cost never worth paying.
+window.addEventListener('message', (e) => {
+  if (e.source !== window) return;
+  const d = e.data as { __facescrapCtl?: boolean; diag?: unknown } | null;
+  if (d && d.__facescrapCtl === true && typeof d.diag === 'boolean') setDiagEnabled(d.diag);
+});
+window.postMessage({ __facescrapCtl: true, query: true }, '*');
+
+/** Hand this world's counts to the content script, which owns chrome.storage. */
+function flushDiag(): void {
+  const counters = diagDrain();
+  if (Object.keys(counters).length > 0) window.postMessage({ __facescrap: true, diag: counters }, '*');
+}
+
+function post(items: readonly MediaItem[]): void {
   // The receiver hard-caps each message at MAX_ITEMS_PER_MESSAGE to bound a hostile
   // co-resident script. One real reels-feed response harvests well past that
   // (~1248 items measured), so posting it as a single message would silently drop
@@ -26,9 +64,6 @@ function post(items: MediaItem[]): void {
     window.postMessage({ __facescrap: true, items: items.slice(i, i + MAX_ITEMS_PER_MESSAGE) }, '*');
   }
 }
-
-// Keys under which a DASH MPD XML string may arrive in Facebook's GraphQL.
-const MPD_STRING_KEYS = ['dash_manifest', 'dash_manifest_xml', 'dash_manifest_xml_string', 'manifest_xml', 'playlist'];
 
 // Keys under which a video's thumbnail/poster image may sit in the same node.
 const THUMB_KEYS = [
@@ -83,8 +118,21 @@ function rememberPoster(videoUrl: string, thumb: string | undefined): void {
   }
 }
 
-function pushPair(pair: DashPair, source: MediaSource, out: MediaItem[], now: number, thumb?: string): void {
+function tagStory(item: MediaItem, storyId: string | undefined): MediaItem {
+  if (storyId != null) item.storyIds = [storyId];
+  return item;
+}
+
+function pushPair(
+  pair: DashPair,
+  source: MediaSource,
+  out: BoundedCollector<MediaItem>,
+  now: number,
+  thumb?: string,
+  storyId?: string,
+): void {
   const item = makeItem(pair.videoUrl, 'video', source, 'graphql', now, true);
+  tagStory(item, storyId);
   item.audioUrl = pair.audioUrl;
   const x = xpvOf(pair.videoUrl);
   const poster = thumb ?? (x ? posterByXpv.get(x) : undefined);
@@ -95,13 +143,19 @@ function pushPair(pair: DashPair, source: MediaSource, out: MediaItem[], now: nu
   item.trackIds = pair.trackUrls.map(trackKey);
   if (pair.height != null) item.height = pair.height;
   if (pair.durationSec != null) item.durationSec = pair.durationSec;
-  out.push(item);
+  out.add(item);
 }
 
 // Detect a DASH source on a single object node and emit one linked pair per
 // video quality in the ladder (the side panel groups them into one row with a
 // quality picker via videoGroupKey/resolutionOf).
-function harvestDash(rec: Record<string, unknown>, source: MediaSource, out: MediaItem[], now: number): void {
+function harvestDash(
+  rec: Record<string, unknown>,
+  source: MediaSource,
+  out: BoundedCollector<MediaItem>,
+  now: number,
+  storyId?: string,
+): void {
   // findThumb scans 11 keys on the node; harvest visits EVERY object in a multi-MB
   // payload, and the vast majority carry no DASH. Resolve the poster lazily so the
   // scan runs only on the few nodes that actually emit a pair.
@@ -116,7 +170,8 @@ function harvestDash(rec: Record<string, unknown>, source: MediaSource, out: Med
   };
   if ('all_video_dash_prefetch_representations' in rec) {
     for (const pair of fromPrefetchReps(rec.all_video_dash_prefetch_representations)) {
-      pushPair(pair, source, out, now, poster());
+      if (out.full) break;
+      pushPair(pair, source, out, now, poster(), storyId);
     }
   }
   for (const key of MPD_STRING_KEYS) {
@@ -124,7 +179,10 @@ function harvestDash(rec: Record<string, unknown>, source: MediaSource, out: Med
     if (typeof val === 'string' && val.length > 40) {
       const found = fromMpdXml(decodeMpd(val));
       if (found.length > 0) {
-        for (const pair of found) pushPair(pair, source, out, now, poster());
+        for (const pair of found) {
+          if (out.full) break;
+          pushPair(pair, source, out, now, poster(), storyId);
+        }
         break;
       }
     }
@@ -139,31 +197,52 @@ function pageSource(): MediaSource {
   return 'video';
 }
 
-const VIDEO_KEYS = /^(playable_url|playable_url_quality_hd|browser_native_hd_url|browser_native_sd_url|hd_src|sd_src)$/;
+const VIDEO_KEY_SET: ReadonlySet<string> = new Set(VIDEO_KEYS);
 
 // Recursively collect media URLs from a parsed GraphQL/JSON object.
 // The depth cap only guards against pathological payloads (parsed JSON has no
 // cycles); it must comfortably exceed Facebook's feed nesting, where a home-feed
 // video node sits ~13-19 levels deep (arrays count too).
-function harvest(obj: unknown, source: MediaSource, out: MediaItem[], now: number, depth = 0): void {
-  if (!obj || depth > 48) return;
+function harvest(
+  obj: unknown,
+  source: MediaSource,
+  out: BoundedCollector<MediaItem>,
+  now: number,
+  depth = 0,
+  inheritedStoryId?: string,
+): void {
+  if (!obj || out.full) return;
+  if (depth > 48) {
+    diagBump('harvestDepthExceeded');
+    return;
+  }
   if (Array.isArray(obj)) {
-    for (const v of obj) harvest(v, source, out, now, depth + 1);
+    for (const v of obj) {
+      if (out.full) break;
+      harvest(v, source, out, now, depth + 1, inheritedStoryId);
+    }
     return;
   }
   if (typeof obj !== 'object') return;
 
-  harvestDash(obj as Record<string, unknown>, source, out, now);
+  const rec = obj as Record<string, unknown>;
+  // The rendered Story card and its GraphQL node expose the same opaque `Uz...`
+  // id. Carry it only through this node's descendants so media from prefetched
+  // neighbouring cards remains distinguishable even when request timing is not.
+  const directStoryId = storyDomIdFromGraphqlNode(rec);
+  const storyId = directStoryId ?? inheritedStoryId;
+  harvestDash(rec, source, out, now, storyId);
 
-  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(rec)) {
+    if (out.full) break;
     if (typeof v === 'string' && isFbcdn(v)) {
-      if (VIDEO_KEYS.test(k)) {
-        const item = makeItem(v, 'video', source, 'graphql', now);
-        const th = findThumb(obj as Record<string, unknown>) ?? (xpvOf(v) ? posterByXpv.get(xpvOf(v)!) : undefined);
+      if (VIDEO_KEY_SET.has(k)) {
+        const item = tagStory(makeItem(v, 'video', source, 'graphql', now), storyId);
+        const th = findThumb(rec) ?? (xpvOf(v) ? posterByXpv.get(xpvOf(v)!) : undefined);
         if (th) item.thumbUrl = th;
         rememberPoster(v, th);
-        out.push(item);
-      } else if (k === 'audio_url') out.push(makeItem(v, 'audio', source, 'graphql', now, true));
+        out.add(item);
+      } else if (k === 'audio_url') out.add(makeItem(v, 'audio', source, 'graphql', now, true));
     } else if (v && typeof v === 'object') {
       const node = v as Record<string, unknown>;
       // Image node shape: { uri, width, height }. This branch is promiscuous —
@@ -183,93 +262,118 @@ function harvest(obj: unknown, source: MediaSource, out: MediaItem[], now: numbe
         (typeof node.width !== 'number' || node.width >= 200) &&
         !isProfilePicCrop(node.uri)
       ) {
-        out.push(makeItem(node.uri, 'image', source, 'graphql', now));
+        out.add(makeItem(node.uri, 'image', source, 'graphql', now));
       }
-      harvest(v, source, out, now, depth + 1);
+      harvest(
+        v,
+        source,
+        out,
+        now,
+        depth + 1,
+        storyDomIdForGraphqlChild(directStoryId, inheritedStoryId, k),
+      );
     }
-  }
-}
-
-function jsonUnescape(body: string): string {
-  try {
-    return JSON.parse(`"${body}"`) as string;
-  } catch {
-    return body.replace(/\\\//g, '/');
   }
 }
 
 function processScan(text: string, source: MediaSource): void {
   // Callers pre-gate on fbcdn in scanText(), so text here already contains media candidates.
-  const out: MediaItem[] = [];
+  // 2,500 leaves ample room above the measured ~1,248-item reels feed while
+  // preventing a hostile/changed response from growing work and postMessage
+  // payloads without bound. Aggregate weight catches fewer but giant items.
+  const out = createBoundedCollector<MediaItem>({
+    maxItems: 2_500,
+    maxWeight: 16 * 1024 * 1024,
+    weightOf: (item) => JSON.stringify(item).length,
+  });
   const now = Date.now();
 
   // Regex fallback — robust to GraphQL shape changes.
-  const re = /"(playable_url(?:_quality_hd)?|browser_native_(?:hd|sd)_url)":"(https:[^"]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const url = jsonUnescape(m[2]);
-    if (isFbcdn(url)) out.push(makeItem(url, 'video', source, 'graphql', now));
+  for (const url of extractUrlsByKey(text)) {
+    if (out.full) break;
+    out.add(makeItem(url, 'video', source, 'graphql', now));
   }
 
   // Manifest fallback — the full DASH ladder (every resolution + audio) ships as an
   // escaped MPD string under videoDeliveryResponseResult.dash_manifests[].manifest_xml,
   // sometimes framed so the per-line parser can't split it or nested past the
   // recursion guard; pull it straight from the raw text.
-  const mpdRe = /"manifest_xml":"((?:\\.|[^"\\])+)"/g;
   const seenMpd = new Set<string>();
-  let mpd: RegExpExecArray | null;
-  while ((mpd = mpdRe.exec(text))) {
-    const xml = decodeMpd(jsonUnescape(mpd[1]));
+  for (const raw of extractStringsByKey(text)) {
+    if (out.full) break;
+    const xml = decodeMpd(raw);
     // Dedupe signature must span more than the head: MPD headers are mostly
     // fixed boilerplate, and two same-duration videos would collide (dropping
     // one ladder). Length + head + tail (per-video BaseURLs) is collision-safe.
     const sig = `${xml.length}:${xml.slice(0, 120)}:${xml.slice(-120)}`;
     if (seenMpd.has(sig)) continue;
     seenMpd.add(sig);
-    for (const pair of fromMpdXml(xml)) pushPair(pair, source, out, now);
+    for (const pair of fromMpdXml(xml)) {
+      if (out.full) break;
+      pushPair(pair, source, out, now);
+    }
   }
 
   // Structured parse — GraphQL streams one JSON object per line. Skip a
   // pathologically large single line (>16 MB): JSON.parse + harvest on it would
   // stall the main thread against the MSE player's buffer appends, and the regex
-  // passes above already recover its playable_url/manifest_xml media.
+  // passes above already recover its named video URLs and MPD strings. The
+  // prefetch ladder is a structured array, so recover just that bounded slice
+  // below instead of parsing the whole oversized line.
   const MAX_JSON_LINE = 16 * 1024 * 1024;
   for (const line of text.split('\n')) {
+    if (out.full) break;
     const s = line.trim();
     if (s.length < 2 || s[0] !== '{') continue;
-    if (s.length > MAX_JSON_LINE) continue;
+    if (s.length > MAX_JSON_LINE) {
+      diagBump('jsonLineTooLarge');
+      for (const pair of extractPrefetchPairs(s)) {
+        if (out.full) break;
+        pushPair(pair, source, out, now);
+      }
+      continue;
+    }
     try {
       harvest(JSON.parse(s), source, out, now);
     } catch {
-      /* partial/non-JSON line */
+      diagBump('jsonLineParseError'); /* partial/non-JSON line */
     }
   }
 
-  post(out);
+  if (out.full) diagBump('scanOutputCapped');
+  diagBump('captureGraphql', out.items.length);
+  post(out.items);
 }
 
 // The hook shares the main thread with Facebook's MSE video player; parsing a
 // multi-MB GraphQL response synchronously starves its buffer appends. Queue each
-// response and process one per macrotask, evicting the oldest DISPOSABLE entries
+// response and process one per macrotask, preferring the oldest disposable entries
 // during bursts. `source` is stamped at ENQUEUE time — an SPA navigation before
 // drain must not relabel items captured on the previous surface. Document scans
-// (`keep`) are the primary capture path for standalone reel/watch pages and are
-// exempt from eviction.
+// (`keep`) are the primary capture path for standalone reel/watch pages, but are
+// still subject to the same hard aggregate caps.
 interface ScanJob {
   text: string;
   source: MediaSource;
   keep?: boolean;
 }
 const scanQueue: ScanJob[] = [];
+// Hard per-body/per-job cap. It is enforced while fetch clones stream and again
+// at enqueue so XHR and document scans cannot bypass it.
+const MAX_BODY_BYTES = 24 * 1024 * 1024;
 // Bound the queue by BOTH entry count and total retained bytes: a handful of
 // multi-MB feed bodies matters far more than many tiny ones. queuedBytes tracks the
 // live sum so a scroll burst can't pin tens of MB of response text waiting to drain.
 const SCAN_QUEUE_MAX = 8;
-const SCAN_QUEUE_MAX_BYTES = 8 * 1024 * 1024;
+const SCAN_QUEUE_MAX_BYTES = MAX_BODY_BYTES;
 let queuedBytes = 0;
 let draining = false;
 function scanText(text: string, keep = false): void {
   if (!text || text.length < 20) return;
+  if (text.length > MAX_BODY_BYTES) {
+    diagBump('graphqlBodyTooLarge');
+    return;
+  }
   // Pre-gate at ENQUEUE: every parser needs isFbcdn on each URL, so a body with no
   // fbcdn host yields nothing, and media-less GraphQL (typing/presence/notifs) never
   // takes a queue slot or schedules a drain. Escaped JSON keeps the bare `fbcdn.net`
@@ -277,15 +381,20 @@ function scanText(text: string, keep = false): void {
   if (!text.includes('fbcdn.net')) return;
   scanQueue.push({ text, source: pageSource(), keep });
   queuedBytes += text.length;
-  // Evict oldest DISPOSABLE entries until back under both caps; never drop a `keep`
-  // (document) job, and NEVER the job just pushed: the byte cap bounds the BACKLOG,
-  // not a single in-flight body — one reels-feed response can alone exceed it, and
-  // evicting it would silently drop every ladder it carries.
-  while (queuedBytes > SCAN_QUEUE_MAX_BYTES || scanQueue.length > SCAN_QUEUE_MAX) {
-    const i = scanQueue.findIndex((j) => !j.keep);
-    if (i < 0 || i === scanQueue.length - 1) break; // only keeps left / only the new job
-    const [dropped] = scanQueue.splice(i, 1);
+  // Prefer dropping disposable traffic, but a burst made only of document
+  // (`keep`) jobs is still bounded. No job, including the newly queued one, is
+  // exempt from the aggregate cap.
+  const droppedJobs = trimQueueToBudget({
+    queue: scanQueue,
+    maxItems: SCAN_QUEUE_MAX,
+    maxWeight: SCAN_QUEUE_MAX_BYTES,
+    weightOf: (job) => job.text.length,
+    isDisposable: (job) => !job.keep,
+  });
+  for (const dropped of droppedJobs) {
     queuedBytes -= dropped.text.length;
+    // A whole response, not one item: every ladder it carried is gone.
+    diagBump('scanQueueEvicted');
   }
   if (!draining) {
     draining = true;
@@ -305,14 +414,11 @@ function drainScans(): void {
     /* ignore */
   }
   job.text = ''; // release the body for GC before the next macrotask runs
+  // Macrotask boundary: a natural flush point that needs no timer of its own.
+  flushDiag();
   if (scanQueue.length) setTimeout(drainScans, 0);
   else draining = false;
 }
-
-// Skip buffering a pathologically large response body (compressed size); normal
-// feed/reels responses are a few MB, well under this — this only guards against a
-// multi-hundred-MB outlier forcing a full JS-string materialization.
-const MAX_BODY_BYTES = 24 * 1024 * 1024;
 
 // --- Patch fetch ---
 const origFetch = window.fetch;
@@ -322,12 +428,13 @@ window.fetch = function (this: unknown, ...args: Parameters<typeof fetch>) {
     const input = args[0];
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
     if (url && url.includes('/api/graphql')) {
-      p.then((res) => {
-        // content-length is the COMPRESSED size, so this ceiling is conservative;
-        // absent (chunked/gzip streamed) → Number(null ?? 0)=0 → proceed normally.
-        const len = Number(res.headers.get('content-length') ?? 0);
-        if (len > MAX_BODY_BYTES) return '';
-        return res.clone().text();
+      p.then(async (res) => {
+        const result = await readClonedResponseTextLimited(res, MAX_BODY_BYTES);
+        if (!result.ok) {
+          diagBump('graphqlBodyTooLarge');
+          return '';
+        }
+        return result.text;
       })
         .then(scanText)
         .catch(() => {});
@@ -362,25 +469,70 @@ XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, _method: string,
   return origOpen.apply(this, arguments as unknown as Parameters<typeof origOpen>);
 } as typeof XMLHttpRequest.prototype.open;
 
+// --- Tell the content script when the SPA navigates ---
+// Facebook advances feed → /reel/<id> with pushState, which fires no popstate
+// and no main_frame request (the service worker's own comment notes this). The
+// content script had no navigation signal at all: it waited for its 300ms
+// poller or a media event, and a slide transition detected late restamps
+// slideAt, which is what the anchoring window in now-playing.ts measures
+// against. Patching history has to happen HERE — an isolated content script
+// sees its own History object, not the page's.
+//
+// This does NOT change how the id is resolved: reelVideoId (data-video-id)
+// still outranks the URL, which lags the scroll. It only makes the content
+// script look sooner.
+function notifyNav(): void {
+  try {
+    window.postMessage({ __facescrap: true, nav: true }, '*');
+  } catch {
+    /* ignore */
+  }
+}
+for (const name of ['pushState', 'replaceState'] as const) {
+  const original = history[name];
+  history[name] = function (this: History, ...args: Parameters<typeof original>) {
+    const result = original.apply(this, args);
+    notifyNav();
+    return result;
+  } as typeof original;
+}
+// pushState/replaceState do not fire popstate; back/forward do not call them.
+window.addEventListener('popstate', notifyNav);
+
 // --- Scan embedded JSON in the initial document (reel/watch standalone pages). ---
 // Facebook ships the media (DASH ladders, playable_urls) inside <script> JSON blobs,
 // NOT the rendered markup; scanning only fbcdn-mentioning script contents (rather
 // than the whole outerHTML) avoids retaining megabytes of DOM/CSS/SVG. Rendered
 // <img>/<video> covers are captured by the content script's DOM scan.
-function scanDocument(): void {
+let documentScanRunning = false;
+async function scanDocument(): Promise<void> {
+  if (documentScanRunning) return;
+  documentScanRunning = true;
   try {
-    let text = '';
-    for (const s of document.querySelectorAll('script')) {
-      const c = s.textContent;
-      if (c && c.length > 40 && c.includes('fbcdn.net')) text += c + '\n';
+    const budget = createTextBudget(MAX_BODY_BYTES);
+    const scripts = document.querySelectorAll('script');
+    for (let i = 0; i < scripts.length; i += 1) {
+      const c = scripts[i]?.textContent;
+      if (c && c.length > 40 && c.includes('fbcdn.net') && !budget.add(c, '\n')) {
+        diagBump('documentScanCapped');
+        break;
+      }
+      // Large initial documents can contain thousands of script tags. Yield
+      // between small batches so the Facebook player can append MSE buffers.
+      if (i > 0 && i % 32 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
+    const text = budget.value();
     if (text) scanText(text, true);
   } catch {
     /* ignore */
+  } finally {
+    documentScanRunning = false;
   }
 }
-scanDocument();
+void scanDocument();
 window.addEventListener('load', () => {
-  scanDocument();
-  window.setTimeout(scanDocument, 2500);
+  void scanDocument();
+  window.setTimeout(() => void scanDocument(), 2500);
 });
+// Counts bumped after the last drain would otherwise die with the page.
+window.addEventListener('pagehide', flushDiag);

@@ -5,11 +5,18 @@ const localData: Stored = {};
 
 function area(data: Stored, clone: (values: Stored) => Stored) {
   return {
-    // Only the single-string-key form: every call site in src/ and tests/ uses
-    // it. Clone on the way out too — real chrome.storage copies in BOTH
-    // directions, so a returned object must never alias the store.
-    async get(key: string): Promise<Stored> {
-      return key in data ? clone({ [key]: data[key] }) : {};
+    // Clone on the way out too — real chrome.storage copies in BOTH directions,
+    // so a returned object must never alias the store. `null` is the Chrome API
+    // form for an area-wide snapshot; quota recovery needs one atomic view of
+    // every per-tab media key before choosing safe global eviction candidates.
+    async get(key: string | string[] | null): Promise<Stored> {
+      if (key === null) return clone(data);
+      const keys = typeof key === 'string' ? [key] : key;
+      const selected: Stored = {};
+      for (const candidate of keys) {
+        if (candidate in data) selected[candidate] = data[candidate];
+      }
+      return clone(selected);
     },
     async set(values: Stored): Promise<void> {
       Object.assign(data, clone(values));

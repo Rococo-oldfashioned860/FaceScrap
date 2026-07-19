@@ -6,9 +6,26 @@
 // (loadBindings / flushBindingsNow / purgeTabBindings / forgetLastLive) to
 // its tab events.
 
-import { fbAssetKeys, mediaId, trackKey, videoGroupKey, type MediaItem } from './media';
-import { getBind, getPlaying, getRecent, setBind } from './storage';
-import { isDurableStoryMark, isProvisionalStoryMark } from './story-mark';
+import { fbAssetKeys, legacyMediaId, mediaId, trackKey, videoGroupKey, type MediaItem } from './media';
+import { withTimeout } from './async';
+import {
+  playingTimestampIsFutureEpoch,
+  type PersistBindingsAck,
+  type PersistBindingsMsg,
+  type PinPlayingMediaMsg,
+} from './messages';
+import {
+  getBindRecord,
+  getPlaying,
+  getRecent,
+  persistBindings,
+  playingIdentity,
+  playingRetentionIdentity,
+  sanitizeBindState,
+  setPlayingMediaPin,
+  type BindState,
+} from './storage';
+import { durableStoryMarkPortion, isProvisionalStoryMark, storyDomIdFromMark } from './story-mark';
 
 // An MSE-played video (blob: currentSrc, never in ref.ids) only matches via fetched
 // tracks, which age out of the match window after streaming stops — so remember the
@@ -38,10 +55,33 @@ const PLAYING_TAKEOVER_MS = 10 * 1000;
 // newest matching track this fresh). A one-shot neighbour prefetch stops being
 // fresh almost immediately; genuine playback keeps re-fetching and stays fresh.
 const FETCH_FRESH_MS = 12 * 1000;
-// seenActive: the centered-media id signature under which the remembered video
-// was endorsed. When the signature CHANGES, the user visibly moved to another
-// slide — the strongest relay trigger for back-to-back videos whose covers we
-// can't match to captures.
+// The request for a newly visible Story can beat the 300 ms DOM poll that
+// reports its PlayingRef. The live stress trace also measured a 697 ms main-
+// thread stall, so poll + stall can put the first request roughly one second
+// before the marker. Keep the allowance bounded and require sustained evidence
+// below before a pre-ref-only burst may use it.
+const SLIDE_DETECTION_SKEW_MS = 1_200;
+// A one-shot post-slide request is still indistinguishable from neighbour
+// prefetch. A group that starts near the marker and keeps requesting across a
+// meaningful span is genuine playback-grade fallback evidence even when no
+// request happened to beat the DOM detector.
+const POST_SLIDE_STREAM_MIN_TRACKS = 3;
+const POST_SLIDE_STREAM_MIN_SPAN_MS = 500;
+
+function atOrAfterDetectedSlide(trackAt: number, slideAt: number): boolean {
+  return trackAt >= slideAt - SLIDE_DETECTION_SKEW_MS;
+}
+
+function anchoredToSlide(trackAt: number, slideAt: number): boolean {
+  return atOrAfterDetectedSlide(trackAt, slideAt) && trackAt - slideAt < FETCH_FRESH_MS;
+}
+
+function anchoredAfterSlide(trackAt: number, slideAt: number): boolean {
+  return trackAt >= slideAt && trackAt - slideAt < FETCH_FRESH_MS;
+}
+// seenActive: the visible-media identity under which the remembered video was
+// endorsed. A DOM-proven Story uses only its durable card id: its MSE handle and
+// placeholder ids may churn while that same card remains on screen.
 const lastLive = new Map<number, { keys: Set<string>; at: number; seenActive: string }>();
 // Slide signatures under which honest-empty REFUSED to guess. The refusal must
 // survive the deletion of lastLive it performs: one tick later prev is null and
@@ -62,6 +102,31 @@ const groupCover = new Map<string, string>();
 // when the endorsement is backed by post-slide fetch evidence (no poisoning).
 const markBind = new Map<string, string>();
 const BIND_MAX = 300;
+// Distinct fresh bursts that contradict a coverBind with anchored evidence for a
+// DIFFERENT group. A learned binding is read as DOM-grade, and DOM-grade wins the
+// cascade unconditionally — so a binding learned from a wrong guess re-proves
+// itself on every later tick and never expires (only FIFO eviction or a real
+// navigation clears it). endorse()'s comments record this being observed.
+//
+// Two ticks, not one: a single tick cannot separate the watched video from a deep
+// bucket's burst prefetch anchoring in the same transition instant — the exact
+// ambiguity endorse() already documents. Across two, genuine evidence stays
+// anchored while a one-shot prefetch has gone quiet.
+//
+// In memory only, like lastLive: it describes the current disagreement, not
+// anything worth restoring after a reload.
+interface BindDisagreement {
+  activeSig: string;
+  group: string;
+  newest: number;
+  streak: number;
+}
+const bindDisagree = new Map<string, BindDisagreement>();
+// Avoid one worker round-trip on every 500 ms render after a confirmation. This
+// is only a write-dedup cache; storage remains the retention authority.
+const confirmedPinWrites = new Map<number, string>();
+const PIN_ACK_TIMEOUT_MS = 5_000;
+const BIND_DISAGREE_STREAK = 2;
 // How long a definite slide change may wait for the new video's GraphQL capture
 // (its stream is visible but matches no captured item yet) before relays and
 // honest-empty proceed anyway.
@@ -70,15 +135,6 @@ function remember(map: Map<string, string>, key: string, value: string): void {
   if (map.has(key)) map.delete(key); // refresh insertion order
   map.set(key, value);
   if (map.size > BIND_MAX) map.delete(map.keys().next().value as string);
-}
-
-// The re-attach-durable slice of a combined mark: the DOM-proven
-// `u:<owner>/<card>` portion before `#`. A `p:` path fallback is provisional —
-// the path is tray-wide — so it deliberately has no durable portion.
-function markStoryPortion(mark: string | undefined): string | undefined {
-  if (!isDurableStoryMark(mark)) return undefined;
-  const i = mark.indexOf('#');
-  return i >= 0 ? mark.slice(0, i) : mark;
 }
 
 /** The cover URL learned for a video group while it played on screen. */
@@ -90,79 +146,244 @@ export function getGroupCover(tid: number, groupKey: string): string | undefined
 export function forgetLastLive(tid: number): void {
   lastLive.delete(tid);
   emptiedUnder.delete(tid);
+  confirmedPinWrites.delete(tid);
+}
+
+async function persistPlayingPin(tid: number, identity: string, groups: Set<string>, playingAt: number): Promise<void> {
+  const orderedGroups = [...groups].sort();
+  const signature = `${identity}|${playingAt}|${orderedGroups.join(',')}`;
+  if (confirmedPinWrites.get(tid) === signature) return;
+  const message = {
+    type: 'FACESCRAP_PIN_PLAYING_MEDIA',
+    tabId: tid,
+    identity,
+    groups: orderedGroups,
+    playingAt,
+  } satisfies PinPlayingMediaMsg;
+
+  // Route the production write through the worker so it shares addMedia's
+  // per-tab lane. Tests and degraded runtimes have no runtime bus and use the
+  // awaited direct fallback instead.
+  if (typeof chrome.runtime?.sendMessage === 'function') {
+    try {
+      const response = (await withTimeout(
+        chrome.runtime.sendMessage(message),
+        PIN_ACK_TIMEOUT_MS,
+        'Playing pin acknowledgement timed out.',
+      )) as { ok?: boolean } | undefined;
+      if (response?.ok === true) {
+        confirmedPinWrites.set(tid, signature);
+      }
+    } catch {
+      // A sleeping/restarting worker is recoverable: this signature remains
+      // unconfirmed, so the next 500 ms render retries it through the worker.
+      // Never cross into this panel context's independent storage queue — that
+      // would race addMedia/clearTab in the worker and defeat the pin's purpose.
+    }
+    return;
+  }
+  // Unit harnesses and degraded non-extension runtimes have no message bus.
+  // Only there is a direct write safe, because there is no competing worker.
+  if (await setPlayingMediaPin(tid, identity, orderedGroups, playingAt)) {
+    confirmedPinWrites.set(tid, signature);
+  }
 }
 
 // --- Persist the learned bindings so a reopened panel re-matches ---
-// Written per tab under bind_<tabId>; dirty-flagged, 1s-debounced, serialized
-// through setBind's chain. The dirty tab is remembered explicitly (pendingTid),
-// so the debounced write always lands on the tab that learned, even around a
-// tab switch. lastLive is intentionally NOT persisted (see storage.ts).
-let bindDirty = false;
-let bindFlushTimer: ReturnType<typeof setTimeout> | undefined;
-let pendingTid: number | undefined;
-function cancelBindFlush(): void {
-  bindDirty = false;
-  pendingTid = undefined;
-  if (bindFlushTimer !== undefined) {
-    clearTimeout(bindFlushTimer);
-    bindFlushTimer = undefined;
-  }
+// Written per tab under bind_<tabId>; dirty-flagged, 1s-debounced and delivered
+// through a worker-owned versioned CAS. Each tab keeps its own immutable
+// in-flight snapshot, so tab switches and concurrent retries cannot cross-wire.
+// lastLive is intentionally NOT persisted (see storage.ts).
+const BIND_ACK_TIMEOUT_MS = 5_000;
+const BIND_RETRY_MIN_MS = 250;
+const BIND_RETRY_MAX_MS = 8_000;
+interface BindingOutbox {
+  generation: number;
+  revision: number;
+  dirty: boolean;
+  retry: number;
+  epoch: number;
+  timer?: ReturnType<typeof setTimeout>;
+  inFlight?: { state: BindState; generation: number; baseRevision: number; epoch: number };
 }
+const bindingOutbox = new Map<number, BindingOutbox>();
+function ensureBindingOutbox(tid: number): BindingOutbox {
+  let outbox = bindingOutbox.get(tid);
+  if (outbox == null) {
+    outbox = { generation: 0, revision: 0, dirty: false, retry: 0, epoch: 0 };
+    bindingOutbox.set(tid, outbox);
+  }
+  return outbox;
+}
+
 function scheduleBindFlush(tid: number): void {
-  bindDirty = true;
-  pendingTid = tid;
-  if (bindFlushTimer !== undefined) return;
-  bindFlushTimer = setTimeout(() => {
-    bindFlushTimer = undefined;
-    flushBindingsNow();
+  const outbox = ensureBindingOutbox(tid);
+  outbox.dirty = true;
+  if (outbox.timer !== undefined || outbox.inFlight != null) return;
+  outbox.timer = setTimeout(() => {
+    outbox.timer = undefined;
+    void pumpBindings(tid);
   }, 1000);
 }
 export function flushBindingsNow(): void {
-  if (bindFlushTimer !== undefined) {
-    clearTimeout(bindFlushTimer);
-    bindFlushTimer = undefined;
+  for (const [tid, outbox] of bindingOutbox) {
+    if (outbox.timer !== undefined) {
+      clearTimeout(outbox.timer);
+      outbox.timer = undefined;
+    }
+    if (outbox.dirty) void pumpBindings(tid);
   }
-  if (!bindDirty || pendingTid === undefined) return;
-  bindDirty = false;
-  const tid = pendingTid;
-  pendingTid = undefined;
+}
+
+function bindingState(tid: number): BindState {
   const prefix = `${tid}:`;
   const strip = (m: Map<string, string>): [string, string][] =>
     [...m.entries()]
       .filter(([k]) => k.startsWith(prefix))
       .map(([k, v]) => [k.slice(prefix.length), v] as [string, string]);
-  void setBind(tid, {
+  return sanitizeBindState({
     coverBind: strip(coverBind),
     groupCover: strip(groupCover),
     markBind: strip(markBind),
-  });
+  }) as BindState;
 }
-export async function loadBindings(tid: number): Promise<void> {
-  const state = await getBind(tid);
-  if (!state) return;
+
+function sameBindingState(left: BindState, right: BindState): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function dropBindingMemory(tid: number): void {
   const prefix = `${tid}:`;
-  for (const [k, v] of state.coverBind) remember(coverBind, prefix + k, v);
-  for (const [k, v] of state.groupCover) remember(groupCover, prefix + k, v);
+  for (const m of [coverBind, groupCover, markBind, bindDisagree]) {
+    for (const key of [...m.keys()]) if (key.startsWith(prefix)) m.delete(key);
+  }
+}
+
+function restoreBindingState(tid: number, state: BindState | null): void {
+  if (state == null) return;
+  const prefix = `${tid}:`;
+  for (const [key, value] of state.coverBind) remember(coverBind, prefix + key, value);
+  for (const [key, value] of state.groupCover) remember(groupCover, prefix + key, value);
+  for (const [key, value] of state.markBind) {
+    if (!isProvisionalStoryMark(key)) remember(markBind, prefix + key, value);
+  }
+}
+
+function retryBindings(tid: number, outbox: BindingOutbox): void {
+  if (bindingOutbox.get(tid) !== outbox || !outbox.dirty || outbox.timer !== undefined) return;
+  const delay = Math.min(BIND_RETRY_MAX_MS, BIND_RETRY_MIN_MS * 2 ** Math.min(outbox.retry++, 5));
+  outbox.timer = setTimeout(() => {
+    outbox.timer = undefined;
+    void pumpBindings(tid);
+  }, delay);
+}
+
+async function deliverBindings(tid: number, snapshot: NonNullable<BindingOutbox['inFlight']>): Promise<PersistBindingsAck> {
+  const message = {
+    type: 'FACESCRAP_PERSIST_BINDINGS',
+    tabId: tid,
+    generation: snapshot.generation,
+    baseRevision: snapshot.baseRevision,
+    state: snapshot.state,
+  } satisfies PersistBindingsMsg;
+  if (typeof chrome.runtime?.sendMessage === 'function') {
+    return (await withTimeout(
+      chrome.runtime.sendMessage(message),
+      BIND_ACK_TIMEOUT_MS,
+      'Binding acknowledgement timed out.',
+    )) as PersistBindingsAck;
+  }
+  const result = await persistBindings(tid, message);
+  return result.ok
+    ? result
+    : { ok: false, retryable: true, error: 'Binding revision conflict.', conflict: result.record };
+}
+
+async function pumpBindings(tid: number): Promise<void> {
+  const outbox = bindingOutbox.get(tid);
+  if (outbox == null || !outbox.dirty || outbox.inFlight != null) return;
+  const snapshot = {
+    state: bindingState(tid),
+    generation: outbox.generation,
+    baseRevision: outbox.revision,
+    epoch: outbox.epoch,
+  };
+  outbox.inFlight = snapshot;
+  let ack: PersistBindingsAck | undefined;
+  try {
+    ack = await deliverBindings(tid, snapshot);
+  } catch {
+    // The exact snapshot stays dirty. A retry is idempotent if the write landed
+    // but its acknowledgement was lost.
+  }
+  if (bindingOutbox.get(tid) !== outbox || outbox.inFlight !== snapshot || outbox.epoch !== snapshot.epoch) return;
+  outbox.inFlight = undefined;
+  if (ack?.ok === true) {
+    outbox.generation = ack.generation;
+    outbox.revision = ack.revision;
+    outbox.retry = 0;
+    outbox.dirty = !sameBindingState(bindingState(tid), snapshot.state);
+    if (outbox.dirty) retryBindings(tid, outbox);
+    return;
+  }
+  if (ack?.conflict != null) {
+    const current = ack.conflict;
+    if (current.generation !== snapshot.generation) {
+      dropBindingMemory(tid);
+      outbox.generation = current.generation;
+      outbox.revision = current.revision;
+      outbox.dirty = false;
+      outbox.retry = 0;
+      return;
+    }
+    const local = bindingState(tid);
+    dropBindingMemory(tid);
+    restoreBindingState(tid, current.state);
+    restoreBindingState(tid, local);
+    outbox.revision = current.revision;
+  }
+  retryBindings(tid, outbox);
+}
+
+export async function loadBindings(tid: number): Promise<void> {
+  const existing = ensureBindingOutbox(tid);
+  const epoch = existing.epoch;
+  const record = await getBindRecord(tid);
+  const current = bindingOutbox.get(tid);
+  if (current == null || current.epoch !== epoch || current.dirty || current.inFlight != null) return;
+  dropBindingMemory(tid);
+  restoreBindingState(tid, record.state);
+  const outbox = ensureBindingOutbox(tid);
+  outbox.generation = record.generation;
+  outbox.revision = record.revision;
+  outbox.dirty = false;
+  outbox.retry = 0;
   // Provenance invariant (markBind never holds `p:` keys), restore layer: the
   // write gate in endorse() already refuses provisional marks, so a clean
   // write path can't persist one — this filter only guards corrupt or
   // hand-written storage, and the read guard in selectPlaying backstops both.
-  for (const [k, v] of state.markBind) {
-    if (!isProvisionalStoryMark(k)) remember(markBind, prefix + k, v);
-  }
 }
 // A nav/close reset (clearTab) fired for this tab: drop its in-memory learned
 // bindings + last-live and cancel any pending flush, so a debounced write can't
 // resurrect bind_ after storage was wiped (the F5 race) and the panel stops
 // showing the pre-reload video from stale in-memory state.
 export function purgeTabBindings(tid: number): void {
-  const prefix = `${tid}:`;
-  for (const m of [coverBind, groupCover, markBind]) {
-    for (const k of [...m.keys()]) if (k.startsWith(prefix)) m.delete(k);
-  }
+  dropBindingMemory(tid);
   lastLive.delete(tid);
   emptiedUnder.delete(tid);
-  if (pendingTid === tid) cancelBindFlush();
+  confirmedPinWrites.delete(tid);
+  const outbox = ensureBindingOutbox(tid);
+  if (outbox?.timer !== undefined) clearTimeout(outbox.timer);
+  // Retain this invalidation token. Deleting the outbox let a loadBindings()
+  // that started before Clear finish afterward, see no epoch to contradict it,
+  // and restore the stale snapshot into memory.
+  outbox.epoch++;
+  outbox.timer = undefined;
+  outbox.inFlight = undefined;
+  outbox.dirty = false;
+  outbox.retry = 0;
+  outbox.generation = 0;
+  outbox.revision = 0;
 }
 
 /** Items for what's on screen: centered DOM media + the video being fetched now,
@@ -171,13 +392,18 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   const [ref, recent] = await Promise.all([getPlaying(tid), getRecent(tid)]);
   const active = new Set(ref?.ids ?? []);
   const now = Date.now();
+  if (playingTimestampIsFutureEpoch(lastLive.get(tid)?.at ?? 0, now)) lastLive.delete(tid);
 
   // Fetched-track fallback: every fbcdn track streamed within the match window —
   // only trusted while a <video> is actually centered, so a photo story doesn't
   // surface a stale video. Precompute each track's match keys: efg asset ids
   // (canonical), mediaId (legacy numeric), trackKey (filename).
   const tracks =
-    ref?.hasVideo && recent ? recent.tracks.filter((t) => now - t.at < TRACK_MATCH_WINDOW_MS) : [];
+    ref?.hasVideo && recent
+      ? recent.tracks.filter(
+          (t) => !playingTimestampIsFutureEpoch(t.at, now) && now - t.at < TRACK_MATCH_WINDOW_MS,
+        )
+      : [];
   const trackSigs = tracks.map((t) => ({
     assets: fbAssetKeys(t.url),
     mid: mediaId(t.url),
@@ -218,21 +444,32 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
 
   // DOM-grade evidence: the item (or its cover) is under the viewport centre, or
   // the page URL names this exact video (/reel/<id> → the efg `vid:` key of every
-  // representation). Both tie the item to what the user is actually LOOKING at.
+  // representation), or its GraphQL node carries the active Story card's exact
+  // DOM id. All three tie the item to what the user is actually LOOKING at.
   const urlVid = ref?.vid != null ? `vid:${ref.vid}` : undefined;
-  const domMatch = (i: MediaItem, g: string, k: ItemKeys): boolean => {
-    if (active.has(i.id)) return true;
+  const storyDomId = storyDomIdFromMark(ref?.mark);
+  // Split by PROVENANCE, not just by outcome: evidence derived from this tick
+  // cannot be poisoned, a learned binding can. Only the latter is second-guessed.
+  const domMatchFresh = (i: MediaItem, k: ItemKeys): boolean => {
+    if (active.has(i.id) || active.has(mediaId(i.url)) || active.has(legacyMediaId(i.url) ?? '')) return true;
     if (i.thumbUrl != null && active.has(mediaId(i.thumbUrl))) return true;
+    if (storyDomId != null && i.kind === 'video' && i.storyIds?.includes(storyDomId) === true) return true;
     if (urlVid != null && i.kind === 'video') {
       if (k.keys.includes(urlVid)) return true;
       if (k.audioKeys.includes(urlVid)) return true;
     }
-    // Learned binding: a centered cover we previously saw over this exact video.
+    return false;
+  };
+  // Learned binding: a centered cover we previously saw over this exact video.
+  const coverBindMatch = (g: string): boolean => {
     for (const id of active) {
       if (coverBind.get(`${tid}:${id}`) === g) return true;
     }
     return false;
   };
+  /** Either provenance. Used where the distinction does not apply — the final
+   *  photo filter, which has no group of its own to second-guess. */
+  const domMatch = (i: MediaItem, g: string, k: ItemKeys): boolean => domMatchFresh(i, k) || coverBindMatch(g);
 
   // Two-tier live detection. DOM-grade evidence is authoritative: it replaces the
   // remembered video, so moving to the next reel/story swaps the row. Fetch-only
@@ -245,43 +482,96 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   const domLive = new Set<string>();
   const fetchScore = new Map<string, number>();
   const fetchNewest = new Map<string, number>();
-  const fetchOldest = new Map<string, number>();
+  const fetchClosestToSlide = new Map<string, number>();
+  // Earliest track inside the bounded detector-skew window. This may relay the
+  // visible row, but is deliberately separate from the strict post-slide map
+  // below so pre-slide evidence can never create a durable binding.
+  const fetchOldestNear = new Map<string, number>();
   // Oldest POST-slide track per group — the markBind learn gate's anchor. The
   // global oldest is dragged arbitrarily far back by pre-slide prefetch residue
   // inside the wide match window, which would silently block learning for a
   // group that ALSO streamed genuine near-slide evidence.
   const fetchOldestSince = new Map<string, number>();
+  const fetchPostCount = new Map<string, number>();
+  // Groups admitted to domLive by fresh evidence vs by a learned binding alone.
+  // Only the second kind can be poisoned, so only it is second-guessed below.
+  const freshGroups = new Set<string>();
+  const bindGroups = new Set<string>();
   const trackMatched: boolean[] = new Array(trackSigs.length).fill(false);
   for (const i of items) {
     if (i.kind !== 'video') continue;
     const k = keysOf(i);
     const g = k.keys[0] ?? i.id; // == videoGroupKey(i), reusing the decode above
-    if (domMatch(i, g, k)) {
+    if (domMatchFresh(i, k)) {
       domLive.add(g);
+      freshGroups.add(g);
+      continue;
+    }
+    if (coverBindMatch(g)) {
+      domLive.add(g);
+      bindGroups.add(g);
       continue;
     }
     let score = 0;
     let newest = 0;
-    let oldest = Infinity;
+    let closestToSlide = Infinity;
+    let oldestNear = Infinity;
     let oldestSince = Infinity; // first track fetched AFTER this slide appeared
+    let postCount = 0;
     for (let ti = 0; ti < trackSigs.length; ti++) {
       if (matchesTrack(i, k, trackSigs[ti])) {
         trackMatched[ti] = true;
         score++;
         newest = Math.max(newest, tracks[ti].at);
-        oldest = Math.min(oldest, tracks[ti].at);
-        if (tracks[ti].at >= slideAt) oldestSince = Math.min(oldestSince, tracks[ti].at);
+        if (Math.abs(tracks[ti].at - slideAt) < Math.abs(closestToSlide - slideAt)) {
+          closestToSlide = tracks[ti].at;
+        }
+        if (atOrAfterDetectedSlide(tracks[ti].at, slideAt)) {
+          oldestNear = Math.min(oldestNear, tracks[ti].at);
+        }
+        if (tracks[ti].at >= slideAt) {
+          oldestSince = Math.min(oldestSince, tracks[ti].at);
+          postCount++;
+        }
       }
     }
     if (score > 0) {
       fetchScore.set(g, Math.max(score, fetchScore.get(g) ?? 0));
       fetchNewest.set(g, Math.max(newest, fetchNewest.get(g) ?? 0));
-      fetchOldest.set(g, Math.min(oldest, fetchOldest.get(g) ?? Infinity));
+      const previousClosest = fetchClosestToSlide.get(g) ?? Infinity;
+      if (Math.abs(closestToSlide - slideAt) < Math.abs(previousClosest - slideAt)) {
+        fetchClosestToSlide.set(g, closestToSlide);
+      }
+      if (oldestNear !== Infinity) {
+        fetchOldestNear.set(g, Math.min(oldestNear, fetchOldestNear.get(g) ?? Infinity));
+      }
       if (oldestSince !== Infinity) {
         fetchOldestSince.set(g, Math.min(oldestSince, fetchOldestSince.get(g) ?? Infinity));
+        fetchPostCount.set(g, Math.max(postCount, fetchPostCount.get(g) ?? 0));
       }
     }
   }
+  const hasSlideStreamEvidence = (g: string): boolean => {
+    const near = fetchOldestNear.get(g) ?? Infinity;
+    const oldestSince = fetchOldestSince.get(g) ?? Infinity;
+    const newest = fetchNewest.get(g) ?? -Infinity;
+    // A request that beat the DOM detector is only trustworthy when the SAME
+    // group continues across the boundary. A one-sided burst is indistinguishable
+    // from Facebook prefetching a neighbour, even when it lands just after the
+    // marker. Exact Story/URL/cover associations are handled as DOM-grade above.
+    const crossedBoundary =
+      near < slideAt &&
+      anchoredToSlide(near, slideAt) &&
+      newest >= slideAt &&
+      now - newest < FETCH_FRESH_MS;
+    const sustainedAfterBoundary =
+      (fetchPostCount.get(g) ?? 0) >= POST_SLIDE_STREAM_MIN_TRACKS &&
+      anchoredAfterSlide(oldestSince, slideAt) &&
+      oldestSince - slideAt <= SLIDE_DETECTION_SKEW_MS &&
+      newest - oldestSince >= POST_SLIDE_STREAM_MIN_SPAN_MS &&
+      now - newest < FETCH_FRESH_MS;
+    return crossedBoundary || sustainedAfterBoundary;
+  };
   // Same-blob revisit rescue: a learned mark→group binding is dom-grade evidence
   // (a prefetch never has a mark), added BEFORE any relay can look at window
   // residue. The FULL mark carries the per-load `vm:` id, so it is card+load
@@ -309,22 +599,24 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // card tracks is forced empty (hasVideo=false ⇒ no fetch evidence), so
   // otherStreamingFresh is unconditionally false and this would re-pin the
   // previously learned video every tick. A photo slide is never a video revisit.
-  const storyPortion = markStoryPortion(ref?.mark);
+  const storyPortion = durableStoryMarkPortion(ref?.mark);
   const boundGroup =
     ref?.hasVideo === true && storyPortion != null ? markBind.get(`${tid}:${storyPortion}`) : undefined;
   if (boundGroup != null) {
     const otherStreamingFresh = [...fetchNewest].some(
-      ([g, at]) => g !== boundGroup && at >= slideAt && now - at < FETCH_FRESH_MS,
+      ([g, at]) => g !== boundGroup && hasSlideStreamEvidence(g) && now - at < FETCH_FRESH_MS,
     );
     if (!otherStreamingFresh) domLive.add(boundGroup);
   }
-  // A track streamed SINCE this slide began that matches no captured item yet:
+  // A track streamed at this slide boundary that matches no captured item yet:
   // its GraphQL capture is still in flight — hold relays briefly so a captured
   // neighbour prefetch can't steal the endorsement (and burn the signature)
-  // meanwhile. Bounded: only post-slide fresh tracks, at most CAPTURE_WAIT_MS.
+  // meanwhile. Bounded: only near-boundary fresh tracks, at most CAPTURE_WAIT_MS.
   const captureWait =
     now - slideAt < CAPTURE_WAIT_MS &&
-    tracks.some((t, ti) => t.at >= slideAt && now - t.at < FETCH_FRESH_MS && !trackMatched[ti]);
+    tracks.some(
+      (t, ti) => atOrAfterDetectedSlide(t.at, slideAt) && now - t.at < FETCH_FRESH_MS && !trackMatched[ti],
+    );
   // Rank by RECENCY first: what is streaming right now is what's playing. The
   // previous video's residue can out-COUNT a just-started one — count only
   // breaks ties within the same burst.
@@ -333,15 +625,68 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   );
   const bestFetch = ranked[0]?.[0];
 
-  // Slide signature: centered ids PLUS the opaque video marker. The marker is
-  // what distinguishes back-to-back video slides on surfaces that expose no
-  // cover/poster ids at all (this viewer unmounts covers during playback).
-  const activeSig = `${[...active].sort().join(',')}|${ref?.mark ?? ''}`;
+  // Use durable identity whenever the surface exposes one. `#vm` names a single
+  // MSE load, not a Story; provisional/blind surfaces still retain the full
+  // marker and centered ids through playingIdentity().
+  const activeSig = playingIdentity(ref);
   const blind = active.size === 0 && (ref?.mark ?? '') === '';
+  const relayable = (g: string): boolean => {
+    const newest = fetchNewest.get(g) ?? -Infinity;
+    return hasSlideStreamEvidence(g) || (blind && now - newest < FETCH_FRESH_MS);
+  };
+  // Second-guess groups that reached domLive on a learned binding ALONE, before
+  // ANY of the cascade's inputs are read — a binding contradicted by anchored
+  // evidence for another group across BIND_DISAGREE_STREAK consecutive ticks is
+  // wrong, and left in place it re-proves itself on every later tick.
+  for (const g of bindGroups) {
+    const disagreeKey = `${tid}:${g}`;
+    if (freshGroups.has(g)) {
+      bindDisagree.delete(disagreeKey);
+      continue;
+    }
+    const contradicted = [...fetchOldestNear.keys()]
+      .filter((other) => other !== g && relayable(other))
+      .map((group) => ({ group, newest: fetchNewest.get(group) ?? -Infinity }))
+      .filter(({ newest }) => now - newest < FETCH_FRESH_MS)
+      .sort((a, b) => b.newest - a.newest)[0];
+    if (contradicted == null) {
+      bindDisagree.delete(disagreeKey);
+      continue;
+    }
+    const previousDisagreement = bindDisagree.get(disagreeKey);
+    if (
+      previousDisagreement?.activeSig === activeSig &&
+      previousDisagreement?.group === contradicted.group &&
+      contradicted.newest <= previousDisagreement.newest
+    ) {
+      continue;
+    }
+    const streak =
+      previousDisagreement?.activeSig === activeSig && previousDisagreement.group === contradicted.group
+        ? previousDisagreement.streak + 1
+        : 1;
+    if (streak < BIND_DISAGREE_STREAK) {
+      bindDisagree.set(disagreeKey, { activeSig, ...contradicted, streak });
+      continue;
+    }
+    domLive.delete(g);
+    for (const id of active) {
+      if (coverBind.get(`${tid}:${id}`) === g) coverBind.delete(`${tid}:${id}`);
+    }
+    bindDisagree.delete(disagreeKey);
+    scheduleBindFlush(tid);
+    // The remembered choice was endorsed off this binding, tick after tick. With
+    // the binding gone it has no evidence left, and leaving it would pin the same
+    // wrong video through the sticky branch — the slide signature never changed,
+    // so no relay would fire to replace it. Dropping it here, BEFORE prev is
+    // read, lets the seed branch pick from what is actually streaming.
+    if (lastLive.get(tid)?.keys.has(g) === true) lastLive.delete(tid);
+  }
+
   const prev = lastLive.get(tid);
   // A relay is only as good as its evidence, and the only evidence that IDs
-  // "the video of THIS slide" is an ANCHORED stream: the candidate's first
-  // post-slide track near the slide start (the markBind learn gate's anchor).
+  // "the video of THIS slide" is an ANCHORED stream: either a strict post-slide
+  // start or one continuous stream crossing the small detector-skew window.
   // Everything else is a guess — window residue can't tell tray card N from
   // N+1 (one prefetch burst, near-identical timestamps), and a mid-watch
   // prefetch of a DEEPER tray bucket streams fresh and post-slide yet belongs
@@ -350,9 +695,6 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // coverBind. On blind surfaces (no ids, no mark) the signature can't change,
   // slideAt goes stale, and no anchor can form — there the old freshness-based
   // takeover is the only relay there is.
-  const relayable = (g: string): boolean =>
-    (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS ||
-    (blind && now - (fetchNewest.get(g) ?? 0) < FETCH_FRESH_MS);
   // Best RELAYABLE candidate OUTSIDE the remembered set — the remembered
   // video's own residual tracks often outscore a just-started next video, so
   // the relay decision must exclude them or back-to-back videos never hand
@@ -368,7 +710,8 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     if (!blind && others.length > 1) {
       others.sort(
         (a, b) =>
-          (fetchOldestSince.get(a[0]) ?? Infinity) - (fetchOldestSince.get(b[0]) ?? Infinity) ||
+          Math.abs((fetchClosestToSlide.get(a[0]) ?? Infinity) - slideAt) -
+            Math.abs((fetchClosestToSlide.get(b[0]) ?? Infinity) - slideAt) ||
           b[1] - a[1],
       );
     }
@@ -388,29 +731,41 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // endorsement, or a fetch endorsement whose stream anchors to the slide
   // start. A guessed endorsement may paint once, but must never teach: a wrong
   // coverBind row misidentifies this exact slide until the FIFO evicts it.
+  let pinWrite: Promise<void> | undefined;
   const endorse = (keys: Set<string>, domGrade = false): void => {
     lastLive.set(tid, { keys, at: now, seenActive: activeSig });
     emptiedUnder.delete(tid);
+    const retentionIdentity = playingRetentionIdentity(ref);
+    const strongForRetention = domGrade || [...keys].every((group) => hasSlideStreamEvidence(group));
+    if (retentionIdentity != null && strongForRetention && ref != null) {
+      pinWrite = persistPlayingPin(tid, retentionIdentity, keys, ref.at);
+    }
     if (keys.size !== 1 || ref?.hasVideo !== true) return;
     const g = keys.values().next().value as string;
-    const anchored = (fetchOldestSince.get(g) ?? Infinity) - slideAt < FETCH_FRESH_MS;
-    if (!domGrade && !anchored) return;
+    // The skew window is sufficient for a transient handoff, but not for
+    // durable learning: a neighbour prefetch can also occur just before the DOM
+    // poll. Only direct DOM evidence or a strictly post-slide stream may write
+    // cover/mark bindings that survive future visits.
+    const durableAnchor = anchoredAfterSlide(fetchOldestSince.get(g) ?? Infinity, slideAt);
+    if (!domGrade && !durableAnchor) return;
     for (const id of active) remember(coverBind, `${tid}:${id}`, g);
-    // Bind the slide marker only when backed by POST-slide fetch evidence whose
-    // FIRST post-slide track sits near the slide start — so residue or a next-
-    // neighbour prefetch (whose stream began well after slideAt) can't poison the
-    // revisit memory, especially the DURABLE story-card key that persists across
-    // reopen. Anchored on fetchOldestSince, not the global oldest: inside the
-    // wide match window the global oldest is dragged back by the group's own
-    // pre-slide prefetch, which would silently block learning for exactly the
-    // stories that need the revisit rescue most. Learn under BOTH the full mark
-    // and the story-card portion. The provisional check is the WRITE gate of
-    // the markBind provenance invariant — loadBindings' restore filter and the
-    // full-mark rescue's read guard mirror it as defense in depth.
-    if (ref.mark != null && anchored && !isProvisionalStoryMark(ref.mark)) {
-      remember(markBind, `${tid}:${ref.mark}`, g);
-      const sp = markStoryPortion(ref.mark);
-      if (sp != null) remember(markBind, `${tid}:${sp}`, g);
+    // A full per-load marker requires POST-slide fetch evidence whose first
+    // track sits near the slide start. The durable Story portion may also be
+    // learned from direct, fresh DOM evidence; that is what survives a panel
+    // restart when an already-buffered video emits no network traffic and the
+    // later poll exposes no src/poster ids. The provisional check is the WRITE
+    // gate of the markBind provenance invariant — loadBindings' restore filter
+    // and the read guards mirror it as defense in depth.
+    if (ref.mark != null && !isProvisionalStoryMark(ref.mark)) {
+      const sp = durableStoryMarkPortion(ref.mark);
+      // Strict post-slide traffic may bind the full per-load marker. Direct DOM
+      // evidence can also bind the durable Story portion even without traffic:
+      // this is the zero-network/buffered case. freshGroups excludes learned
+      // bindings, and stale placeholder covers are removed by centreMedia.
+      if (durableAnchor) remember(markBind, `${tid}:${ref.mark}`, g);
+      if (sp != null && (durableAnchor || (domGrade && freshGroups.has(g)))) {
+        remember(markBind, `${tid}:${sp}`, g);
+      }
     }
     const cover = ref.coverUrls?.[0];
     if (cover != null) remember(groupCover, `${tid}:${g}`, cover);
@@ -429,8 +784,8 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       let seed = bestFetch;
       if (ranked.length > 1) {
         seed = ranked.reduce((a, b) =>
-          Math.abs((fetchOldest.get(b[0]) ?? Infinity) - slideAt) <
-          Math.abs((fetchOldest.get(a[0]) ?? Infinity) - slideAt)
+          Math.abs((fetchClosestToSlide.get(b[0]) ?? Infinity) - slideAt) <
+          Math.abs((fetchClosestToSlide.get(a[0]) ?? Infinity) - slideAt)
             ? b
             : a,
         )[0];
@@ -453,11 +808,19 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
       // for one 12s window at the transition and has long gone quiet.
       const freshNow = (g: string): boolean => now - (fetchNewest.get(g) ?? 0) < FETCH_FRESH_MS;
       const onlyFreshStreaming = freshNow(seed) && ranked.every(([g]) => g === seed || !freshNow(g));
-      if (
-        now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS &&
-        (!refusedHere || relayable(seed) || onlyFreshStreaming)
-      ) {
+      // A freshly detected, identifiable slide must use anchored/cross-boundary
+      // evidence even when lastLive is empty. The permissive cold-open escape is
+      // only for an old unchanged ref whose slideAt can no longer form an anchor.
+      const freshlyDetectedNonBlind = !blind && now - slideAt < FETCH_FRESH_MS;
+      const seedAllowed =
+        relayable(seed) || (!freshlyDetectedNonBlind && (!refusedHere || onlyFreshStreaming));
+      if (now - (fetchNewest.get(seed) ?? 0) < STREAM_SEED_MS && seedAllowed) {
         endorse(new Set([seed]));
+      } else if (freshlyDetectedNonBlind && !relayable(seed)) {
+        // Preserve this refusal beyond the 12 s fresh-slide window. Otherwise
+        // the same lone prefetch becomes seedable later merely because time
+        // passed, despite no new network evidence arriving.
+        emptiedUnder.set(tid, activeSig);
       }
     }
   } else if (
@@ -497,7 +860,16 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // Refresh only on FRESH streaming — window residue must not keep a finished
     // video pinned past the handover to the next one.
     prev.at = now;
-  } else if (ref != null && !ref.hasVideo && (active.size > 0 || activeSig !== prev.seenActive)) {
+  } else if (ref?.hasVideo === true && storyPortion != null && activeSig === prev.seenActive) {
+    // The DOM still proves the same video Story is visible. A fully buffered
+    // player emits no network traffic and Facebook may replace its MSE handle;
+    // neither event means the user advanced to another card.
+    prev.at = now;
+  } else if (
+    ref != null &&
+    !ref.hasVideo &&
+    (active.size > 0 || storyPortion != null || activeSig !== prev.seenActive)
+  ) {
     // A non-video slide is centered now and it is NOT the slide the remembered
     // video was endorsed under: a photo story (centered ids), or a dead
     // "story no longer available" bucket (no ids, no cover — but its card
@@ -507,7 +879,9 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
     // story. The content script debounces transient empties (1.2s), so a
     // no-signal emission reaching here is a stable real slide. A mute slide
     // whose marker cannot advance at all keeps the sticky: with no signal of
-    // change there is nothing honest to act on.
+    // change there is nothing honest to act on. A durable Story marker is itself
+    // enough: after content.ts's stable-empty debounce, hasVideo=false means the
+    // card is no longer presenting the remembered video even if its id stayed.
     lastLive.delete(tid);
   }
 
@@ -518,10 +892,12 @@ export async function selectPlaying(tid: number, items: MediaItem[]): Promise<Me
   // Visible set: DOM-live videos plus the remembered one — never raw fetch-only
   // matches (those may be prefetched neighbours the user isn't watching).
   // Non-videos (photos) match via the centered-media ids only.
-  return items.filter((i) => {
+  const selected = items.filter((i) => {
     const g = videoGroupKey(i);
     // Photos reach domMatch but never its efg branch (video-gated), so NO_KEYS is safe.
     if (i.kind !== 'video') return domMatch(i, g, NO_KEYS);
     return domLive.has(g) || (stickyKeys != null && stickyKeys.has(g));
   });
+  if (pinWrite != null) await pinWrite;
+  return selected;
 }

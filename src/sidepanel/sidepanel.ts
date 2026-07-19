@@ -8,7 +8,9 @@
 // a bulk tray.
 
 import {
+  fbAssetKeys,
   isFbcdn,
+  legacyMediaId,
   mediaId,
   resolutionOf,
   videoGroupKey,
@@ -17,12 +19,22 @@ import {
   type MediaSource,
 } from '../shared/media';
 import { fmt, getLang, setLang, t, type Lang, type MsgKey } from '../shared/i18n';
-import { withTimeout } from '../shared/async';
-import { addSaved, dropSaved, getCaps, getMedia, getSaved, type SavedEntry } from '../shared/storage';
+import { withHeartbeat } from '../shared/async';
+import {
+  getCaps,
+  getDiagCounters,
+  getMedia,
+  getSaved,
+  resetDiagCounters,
+  type SavedEntry,
+} from '../shared/storage';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings } from '../shared/settings';
 import {
-  DASH_UI_TIMEOUT_MS,
+  DASH_UI_HARD_CAP_MS,
+  DASH_UI_IDLE_MS,
   type ClearTabMsg,
+  type DownloadDirectMsg,
+  type DownloadDirectResponse,
   type DownloadDashMsg,
   type DownloadDashResponse,
 } from '../shared/messages';
@@ -132,7 +144,6 @@ const resetGen = (tid: number | undefined): number => (tid === undefined ? 0 : (
 // snapshotted its tid keeps draining after the tab closes, and writing its
 // receipts would recreate the saved_ key purgeTab just removed — the serial
 // chain orders enqueued tasks, not future ones. Consulted before every addSaved.
-const deadTabs = new Set<number>();
 // Chosen quality per video (tabKey(tab, videoGroupKey) → item id), so a re-render
 // (every storage change + the 2s tick) doesn't reset the Now Playing selector to
 // the best — and a pick made in one tab never leaks into another.
@@ -239,6 +250,7 @@ function reflectSettings(): void {
   byId<HTMLInputElement>('set-videosonly').checked = settings.videosOnly;
   byId<HTMLSelectElement>('set-minres').value = String(settings.minResolution);
   byId<HTMLSelectElement>('set-maxitems').value = String(settings.maxItems);
+  byId<HTMLInputElement>('set-diag').checked = settings.diagEnabled;
   // The manual EN/ES toggle is inert while the language follows the browser.
   byId('lang').classList.toggle('is-disabled', settings.followBrowserLang);
 }
@@ -292,8 +304,36 @@ function setupSettings(): void {
   onCheck('set-videosonly', 'videosOnly');
   onSelect('set-minres', (v) => ({ minResolution: Number(v) }));
   onSelect('set-maxitems', (v) => ({ maxItems: Number(v) }));
+  onCheck('set-diag', 'diagEnabled');
+
+  byId('diag-reset').addEventListener('click', () => {
+    void resetDiagCounters().then(renderDiag);
+  });
+  // Only when opened: the counters are a maintenance detail, not worth a
+  // storage read on every settings render.
+  byId('diag-details').addEventListener('toggle', () => {
+    if ((byId('diag-details') as HTMLDetailsElement).open) void renderDiag();
+  });
 
   reflectSettings();
+}
+
+/** Counter names are printed RAW (jsonLineTooLarge, …) rather than translated:
+ *  they are maintenance terms whose whole value is grepping straight to the
+ *  discard site in the code, and a localized label would break that link. */
+async function renderDiag(): Promise<void> {
+  const counters = await getDiagCounters();
+  const rows = Object.entries(counters).filter(([, n]) => n > 0);
+  const pre = byId('diag-counters');
+  if (rows.length === 0) {
+    pre.textContent = t('diagEmpty');
+    return;
+  }
+  const width = Math.max(...rows.map(([reason]) => reason.length));
+  pre.textContent = rows
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, n]) => `${reason.padEnd(width)}  ${n}`)
+    .join('\n');
 }
 
 function isDownloadable(item: MediaItem): boolean {
@@ -341,15 +381,6 @@ function askOnSave(): boolean {
   return settings.defaultQuality === 'ask';
 }
 
-async function download(item: MediaItem): Promise<void> {
-  await chrome.downloads.download({
-    url: item.url,
-    filename: filenameFor(item),
-    conflictAction: 'uniquify',
-    saveAs: askOnSave(),
-  });
-}
-
 /** Append " · tag" to a card's meta line. The separator is the caller's because
  *  the meta line owns its own punctuation. */
 function appendTag(meta: HTMLElement, text: string, cls?: string, title?: string): void {
@@ -373,30 +404,51 @@ function stripAudio(): boolean {
  *  either way — a bulk run must survive one bad item — and reports whether it
  *  landed. Failure/saved bookkeeping is the caller's: it is keyed by CARD, and an
  *  item does not know which card is downloading it. */
-// DASH_UI_TIMEOUT_MS (shared, messages.ts) is a UI hang backstop only — it
-// fires if the SW dies without closing the message port. Correctness timeouts
-// live in the SW (115s per job, measured from job START; jobs run one at a time
-// on its chain), so the outer bound is sized for a realistic queue — this
-// panel's one job plus a couple of other windows' — never for a single merge.
-// The queue can hold at most one job per panel because offscreenBusyHere()
-// gates every download entry point; stacked singles would outrun this bound,
-// tagging landed work failed and dropping its Saved receipt.
+// DASH_UI_IDLE_MS (shared, messages.ts) is a UI hang backstop only — it fires
+// if the SW dies without closing the message port. Correctness timeouts live in
+// the SW. It counts IDLE time, not elapsed: the worker forwards mux progress
+// (FACESCRAP_MUX_PROGRESS) and every report restarts this clock, so a download
+// that legitimately runs for many minutes is never tagged failed here while the
+// worker is still finishing it — which is exactly what a fixed deadline did.
+// Jobs are serialized worker-side, and a queued job reports no progress yet;
+// the window is wide enough to cover that wait, and offscreenBusyHere() gates
+// every download entry point so this panel can only ever have one job pending.
 
-async function startDashDownload(item: MediaItem): Promise<string | null> {
+/** Beat function of the download currently awaiting a merge, if any. Only one
+ *  can exist at a time (see offscreenBusyHere), so a single slot suffices. */
+let muxBeat: (() => void) | null = null;
+chrome.runtime.onMessage.addListener((msg) => {
+  const m = msg as { type?: string } | undefined;
+  if (m?.type === 'FACESCRAP_MUX_PROGRESS') {
+    muxBeat?.();
+  }
+});
+
+async function startDashDownload(tid: number, item: MediaItem, receipt: SavedEntry): Promise<string | null> {
   const audioUrl = item.audioUrl;
   if (audioUrl == null) return 'No audio track.'; // callers gate on audioUrl; narrow it for the typed message
   try {
-    const r: DownloadDashResponse | undefined = await withTimeout(
+    const guarded = withHeartbeat(
       chrome.runtime.sendMessage({
         type: 'FACESCRAP_DOWNLOAD_DASH',
+        tabId: tid,
         videoUrl: item.url,
         audioUrl,
         filename: filenameFor(item),
         saveAs: askOnSave(),
+        receipt,
       } satisfies DownloadDashMsg),
-      DASH_UI_TIMEOUT_MS,
+      DASH_UI_IDLE_MS,
+      DASH_UI_HARD_CAP_MS,
       'The merge timed out.',
     );
+    muxBeat = guarded.beat;
+    let r: DownloadDashResponse | undefined;
+    try {
+      r = (await guarded.promise) as DownloadDashResponse | undefined;
+    } finally {
+      muxBeat = null;
+    }
     if (!r?.ok) throw new Error(r?.error || 'Merge failed.');
     return null;
   } catch (e: unknown) {
@@ -408,9 +460,17 @@ async function startDashDownload(item: MediaItem): Promise<string | null> {
 /** Direct download of a progressive/complete media URL (already has audio).
  *  Resolves either way, for the same reason as startDashDownload. Returns null
  *  on success, or the failure reason to surface on the card. */
-async function startDirectDownload(item: MediaItem): Promise<string | null> {
+async function startDirectDownload(tid: number, item: MediaItem, receipt: SavedEntry): Promise<string | null> {
   try {
-    await download(item);
+    const response = (await chrome.runtime.sendMessage({
+      type: 'FACESCRAP_DOWNLOAD_DIRECT',
+      tabId: tid,
+      url: item.url,
+      filename: filenameFor(item),
+      saveAs: askOnSave(),
+      receipt,
+    } satisfies DownloadDirectMsg)) as DownloadDirectResponse | undefined;
+    if (!response?.ok) throw new Error(response?.error || 'Download failed.');
     return null;
   } catch (e) {
     console.error('[FaceScrap]', e);
@@ -435,20 +495,18 @@ function savedEntryFor(cardId: string, item: MediaItem): SavedEntry {
   };
 }
 
-/** The one download core shared by the single-card and bulk paths: dispatch by
- *  kind (DASH pair → remux, else direct) and, on success, persist the receipt
- *  immediately — the download belongs to the SW and the browser, so a panel
- *  closed mid-queue leaves the file on disk, and a receipt held in memory
- *  would die with the document. Skips the write for a closed tab (deadTabs):
- *  its saved_ key was just purged and must not resurrect. */
+/** The one download core shared by single-card and bulk paths. Both routes go
+ * through the worker, which waits for Chrome's terminal state and persists the
+ * receipt only on `complete`; closing this panel cannot lose that bookkeeping. */
 async function downloadOne(
   tid: number | undefined,
   item: MediaItem,
   receipt: SavedEntry,
 ): Promise<string | null> {
-  const err = item.audioUrl != null ? await startDashDownload(item) : await startDirectDownload(item);
-  if (err === null && tid !== undefined && !deadTabs.has(tid)) await addSaved(tid, receipt);
-  return err;
+  if (tid === undefined) return 'Invalid tab.';
+  return item.audioUrl != null
+    ? startDashDownload(tid, item, receipt)
+    : startDirectDownload(tid, item, receipt);
 }
 
 /** Download one item (a card's or Now Playing's chosen target). Sequential with
@@ -1166,6 +1224,22 @@ async function doRender(): Promise<void> {
 
   cardsById.clear();
   for (const c of cards) cardsById.set(c.id, c);
+  // Re-link pre-canonical Saved receipts to their current live cards. New
+  // receipts always use canonical ids; these aliases disappear with the
+  // browser session once the legacy ledger ages out.
+  for (const group of groups.values()) {
+    const card = cardsById.get(videoCardId(videoGroupKey(group[0])));
+    if (card == null) continue;
+    for (const item of group) {
+      const legacy = legacyMediaId(item.url);
+      if (legacy != null) cardsById.set(videoCardId(fbAssetKeys(item.url)[0] ?? legacy), card);
+    }
+  }
+  for (const item of others) {
+    const legacy = legacyMediaId(item.url);
+    const card = cardsById.get(itemCardId(item.id));
+    if (legacy != null && card != null) cardsById.set(itemCardId(legacy), card);
+  }
   // Forget picks whose card is gone: evicted from storage or left behind by a
   // tab switch. Neither a sub-filter nor a declutter setting drops one — the
   // picks are a cart, and hiding a card from the Library must not empty it.
@@ -1359,9 +1433,6 @@ document.addEventListener('DOMContentLoaded', () => void init());
 async function init(): Promise<void> {
  try {
   await resolveActiveTab();
-  // Restore learned bindings before the first render so a reopened panel can
-  // re-match the current video without waiting for new fbcdn traffic.
-  if (tabId !== undefined) await loadBindings(tabId);
   settings = await loadSettings();
   setLang(await resolveLang());
   const caps = await getCaps();
@@ -1412,14 +1483,22 @@ async function init(): Promise<void> {
     // item and a phantom "failed" tag or stale pick lies. This state survives
     // tab switches by design, so a background wipe missed here would resurface
     // when the user switches back.
+    const wipedTabs = new Set<number>();
     for (const [key, ch] of Object.entries(changes)) {
-      if (ch.newValue !== undefined) continue;
-      const m = /^(?:media|playing)_(\d+)$/.exec(key);
-      if (m) {
-        const wiped = Number(m[1]);
-        purgeTabBindings(wiped);
-        pruneTabState(wiped);
-      }
+      const captureRemoval = ch.newValue === undefined ? /^(?:media|playing)_(\d+)$/.exec(key) : null;
+      const bindChange = /^bind_(\d+)$/.exec(key);
+      const bindRecord = ch.newValue as { state?: unknown } | undefined;
+      const bindingReset = bindChange != null && (ch.newValue === undefined || bindRecord?.state === null);
+      const match = captureRemoval ?? (bindingReset ? bindChange : null);
+      if (match != null) wipedTabs.add(Number(match[1]));
+    }
+    for (const wiped of wipedTabs) {
+      purgeTabBindings(wiped);
+      pruneTabState(wiped);
+      // Load the tombstone generation after the purge. A new binding learned on
+      // the still-open page then writes against the worker's current generation
+      // instead of being discarded as an old-generation conflict.
+      void loadBindings(wiped);
     }
     if (tabId === undefined) return;
     const tid = tabId;
@@ -1434,24 +1513,24 @@ async function init(): Promise<void> {
     }
   });
 
-  // Forget a closed tab's panel-local memory: last-live video, failure tags and
-  // quality picks (cardBusy entries are owned by their in-flight download, which
-  // deletes them on settle). deadTabs stops a draining download from
-  // resurrecting the tab's just-purged saved_ key.
+  // The reset listener must exist before this first asynchronous read. A clear
+  // that lands while bind_<tabId> is loading otherwise goes unseen and the
+  // just-cleared mapping is restored into panel memory.
+  if (tabId !== undefined) await loadBindings(tabId);
+
+  // Forget a closed tab's panel-local memory. Worker-owned terminal settlement
+  // serializes Saved receipts with its own purge and cannot resurrect this tab.
   chrome.tabs.onRemoved.addListener((id) => {
-    forgetLastLive(id);
+    purgeTabBindings(id);
     pruneTabState(id);
-    deadTabs.add(id);
-    // Mirror the SW's saved_ removal on THIS context's write chain: a receipt
-    // write already enqueued here when the tab closed would land after the
-    // worker's remove (serial queues are per-JS-context) and resurrect the key
-    // as an orphan — only our own chain can order against our own writes.
-    void dropSaved(id);
   });
 
   // Keep language and settings in sync if another view (a second panel in another
   // window, or the popup) changes them.
   chrome.storage.local.onChanged.addListener((changes) => {
+    // Live-update the counters while the section is open, so a scroll session in
+    // the Facebook tab shows discards accumulating without reopening settings.
+    if ('diag_counters' in changes && (byId('diag-details') as HTMLDetailsElement).open) void renderDiag();
     const next = changes[LANG_KEY]?.newValue;
     if ((next === 'en' || next === 'es') && next !== getLang()) {
       setLang(next);

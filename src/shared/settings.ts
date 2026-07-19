@@ -26,6 +26,9 @@ export interface Settings {
   minResolution: number;
   /** Per-tab retention cap in storage (0 = unlimited). */
   maxItems: number;
+  /** Count why captures get discarded (see diag.ts). Off by default: it is a
+   *  maintenance tool, and the page hook only picks the flag up on a page load. */
+  diagEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -39,6 +42,7 @@ export const DEFAULT_SETTINGS: Settings = {
   videosOnly: false,
   minResolution: 0,
   maxItems: 1500,
+  diagEnabled: false,
 };
 
 const SETTINGS_KEY = 'settings';
@@ -68,6 +72,7 @@ export function normalizeSettings(raw: unknown): Settings {
     videosOnly: bool(r.videosOnly, DEFAULT_SETTINGS.videosOnly),
     minResolution: num(r.minResolution, DEFAULT_SETTINGS.minResolution),
     maxItems: num(r.maxItems, DEFAULT_SETTINGS.maxItems),
+    diagEnabled: bool(r.diagEnabled, DEFAULT_SETTINGS.diagEnabled),
   };
 }
 
