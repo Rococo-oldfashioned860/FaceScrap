@@ -1,6 +1,10 @@
 # FaceScrap
 
 [![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/Hydza/FaceScrap?color=8957e5&label=release)](https://github.com/Hydza/FaceScrap/releases/latest)
+[![Manifest V3](https://img.shields.io/badge/Manifest-V3-1a73e8)](manifest.json)
+[![Chrome 116+](https://img.shields.io/badge/Chrome-116+-4285F4?logo=googlechrome&logoColor=white)](#chromium-browser-compatibility)
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Save the Facebook **reels, stories and highlights** you can watch, with one click.
